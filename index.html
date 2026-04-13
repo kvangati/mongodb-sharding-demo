@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MongoDB Sharding Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <div class="mongo-logo">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+          <path d="M16 2C16 2 10 8 10 18c0 3.3 2.7 6 6 6s6-2.7 6-6C22 8 16 2 16 2z" fill="#00ED64"/>
+          <path d="M16 26v4" stroke="#00ED64" stroke-width="2" stroke-linecap="round"/>
+          <path d="M14 22c-2 1-4 3-4 3" stroke="#00A349" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h1>MongoDB Sharding <span class="highlight">Demo</span></h1>
+      <span class="version-badge">Interactive Simulator</span>
+    </div>
+    <div class="header-right">
+      <span class="header-stat" id="header-docs">0 docs</span>
+      <span class="header-stat" id="header-shards">0 shards</span>
+      <button class="btn-secondary" id="btn-reset-all">Reset All</button>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <!-- ===== CONFIG SIDEBAR ===== -->
+    <aside class="config-panel">
+      <!-- Sharding Strategy -->
+      <section class="config-section strategy-section">
+        <h3 class="config-title">Sharding Strategy</h3>
+        <div class="strategy-cards">
+          <button class="strategy-card active" data-strategy="range" data-tooltip="<strong>Range Sharding</strong><br>Divides the key space into contiguous value ranges. Ideal for range queries (e.g. date windows), but can create <em>hotspots</em> if writes always land at one end of the range.">
+            <div class="strategy-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="6" height="18" rx="1"/>
+                <rect x="10" y="3" width="6" height="14" rx="1"/>
+                <rect x="17" y="3" width="4" height="10" rx="1"/>
+              </svg>
+            </div>
+            <div class="strategy-label">Range</div>
+            <div class="strategy-desc">Contiguous value ranges</div>
+          </button>
+          <button class="strategy-card" data-strategy="hashed" data-tooltip="<strong>Hashed Sharding</strong><br>Applies a hash function to the shard key, producing uniform write distribution. Eliminates hotspots, but range queries become scatter-gather across all shards.">
+            <div class="strategy-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 8h16M4 16h16M8 4l-2 16M14 4l2 16"/>
+              </svg>
+            </div>
+            <div class="strategy-label">Hashed</div>
+            <div class="strategy-desc">Uniform distribution</div>
+          </button>
+          <button class="strategy-card" data-strategy="zone" data-tooltip="<strong>Zone Sharding</strong><br>Pins ranges of shard key values to specific shards using zone tags. Used for data locality (e.g. EU data stays in EU shards) and compliance with data-residency regulations.">
+            <div class="strategy-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+            </div>
+            <div class="strategy-label">Zone</div>
+            <div class="strategy-desc">Geographic data locality</div>
+          </button>
+        </div>
+        <div class="strategy-info" id="strategy-info"></div>
+      </section>
+
+      <!-- Shard Key -->
+      <section class="config-section shardkey-section">
+        <h3 class="config-title">Shard Key Selection</h3>
+        <div class="shard-key-options" id="shard-key-options"></div>
+      </section>
+
+      <!-- Region Mode -->
+      <section class="config-section region-section">
+        <h3 class="config-title">Deployment Region</h3>
+        <div class="toggle-group">
+          <button class="toggle-btn active" data-region="single" data-tooltip="<strong>Single Region</strong><br>All shards reside in one data centre or cloud region. Lowest latency for local reads/writes. No geographic redundancy — a regional outage affects the entire cluster.">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Single Region
+          </button>
+          <button class="toggle-btn" data-region="multi" data-tooltip="<strong>Multi-Region</strong><br>Shards are distributed across multiple regions. Enables data locality (Zone Sharding), geo-compliance, and resilience to regional failures. Cross-region writes incur higher latency.">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10z"/></svg>
+            Multi-Region
+          </button>
+        </div>
+        <div class="region-detail" id="region-detail"></div>
+      </section>
+
+      <!-- Cluster Config -->
+      <section class="config-section cluster-section">
+        <h3 class="config-title">Cluster Configuration</h3>
+        <div class="cluster-config">
+          <div class="config-row">
+            <span class="config-row-label tip" data-tooltip="<strong>Shards</strong><br>Each shard is an independent replica set that owns a subset of the data. Adding shards increases both storage capacity and write throughput proportionally.">Shards</span>
+            <div class="btn-group" id="shard-count-group">
+              <button class="count-btn active" data-count="2">2</button>
+              <button class="count-btn" data-count="3">3</button>
+              <button class="count-btn" data-count="4">4</button>
+            </div>
+          </div>
+          <div class="config-row">
+            <span class="config-row-label tip" data-tooltip="<strong>Nodes per Shard</strong><br>Each shard runs as a <strong>replica set</strong>. More nodes = higher read throughput (secondary reads) and fault tolerance. A 3-node set can survive 1 failure; 5-node can survive 2.">Nodes/Shard</span>
+            <div class="btn-group" id="nodes-per-shard-group">
+              <button class="count-btn" data-nodes="1">1</button>
+              <button class="count-btn active" data-nodes="3">3</button>
+              <button class="count-btn" data-nodes="5">5</button>
+            </div>
+          </div>
+          <div class="config-row">
+            <span class="config-row-label tip" data-tooltip="<strong>Mongos Routers</strong><br>Stateless query routers that receive application connections, consult the config server's chunk map, and forward operations to the correct shard(s). Scale horizontally — deploy one per app server for best performance.">Mongos Routers</span>
+            <div class="btn-group" id="mongos-count-group">
+              <button class="count-btn active" data-mongos="1">1</button>
+              <button class="count-btn" data-mongos="2">2</button>
+              <button class="count-btn" data-mongos="3">3</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Insert Controls -->
+      <section class="config-section datasim-section">
+        <h3 class="config-title">Data Simulation</h3>
+        <div class="insert-controls">
+          <button class="btn-primary" id="btn-insert-one">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+            Insert Document
+          </button>
+          <button class="btn-primary" id="btn-insert-batch">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            Insert 50 Docs
+          </button>
+          <button class="btn-bulk" id="btn-insert-bulk">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            Load 10,000 Docs
+          </button>
+          <button class="btn-ghost" id="btn-clear">Clear Data</button>
+          <div class="bulk-progress-wrap" id="bulk-progress-wrap" style="display:none">
+            <div class="bulk-progress-bar" id="bulk-progress-bar"></div>
+            <span class="bulk-progress-label" id="bulk-progress-label">0 / 10,000</span>
+          </div>
+        </div>
+        <div class="insert-speed">
+          <label>Animation Speed</label>
+          <input type="range" id="speed-slider" min="1" max="5" value="3">
+          <span id="speed-label">Normal</span>
+        </div>
+      </section>
+    </aside>
+
+    <!-- ===== MAIN VISUALIZATION ===== -->
+    <main class="visualization-panel">
+      <!-- View Tabs -->
+      <div class="view-tabs">
+        <button class="view-tab active" data-tab="topology" data-tooltip="<strong>Cluster Topology</strong><br>Shows the physical layout: mongos routers → config server → shard replica sets. Documents animate into their target shard as you insert them.">Cluster Topology</button>
+        <button class="view-tab" data-tab="distribution" data-tooltip="<strong>Data Distribution</strong><br>Bar charts showing how documents are spread across shards. Hashed sharding should produce near-equal bars; range sharding may skew based on key values.">Data Distribution</button>
+        <button class="view-tab" data-tab="routing" data-tooltip="<strong>Query Routing</strong><br>Run example queries and watch mongos decide which shards to contact. <em>Targeted</em> queries hit 1 shard; <em>scatter-gather</em> queries fan out to all shards.">Query Routing</button>
+        <button class="view-tab" data-tab="balancer" data-tooltip="<strong>Load Balancer</strong><br>The balancer is a background thread on the config server primary that monitors data size per shard and migrates chunks to equalise the distribution.">Load Balancer</button>
+      </div>
+
+      <!-- Topology View -->
+      <div class="tab-content active" id="tab-topology">
+        <div class="topology-container" id="topology-container"></div>
+        <div class="activity-log" id="activity-log">
+          <div class="log-header">
+            <span>Activity Log</span>
+            <button class="btn-ghost btn-xs" id="btn-clear-log">Clear</button>
+          </div>
+          <div class="log-entries" id="log-entries">
+            <div class="log-entry log-info">Ready. Configure your cluster and insert documents to begin.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Distribution View -->
+      <div class="tab-content" id="tab-distribution">
+        <div class="distribution-panel" id="distribution-panel"></div>
+      </div>
+
+      <!-- Query Routing View -->
+      <div class="tab-content" id="tab-routing">
+        <div class="routing-panel" id="routing-panel"></div>
+      </div>
+
+      <!-- Load Balancer View -->
+      <div class="tab-content" id="tab-balancer">
+        <div class="balancer-panel" id="balancer-panel"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
