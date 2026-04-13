@@ -444,7 +444,7 @@ function generateDocument() {
     return {
       ...base,
       order_id: 100000 + docSeq,
-      customer_id: `C${pad(Math.floor(Math.random() * 50000), 6)}`,
+      customer_id: `C${pad(Math.floor(Math.random() * 1000000), 6)}`,
       order_date: new Date(ts - Math.random() * 3e10).toISOString().split('T')[0],
       total: +(Math.random() * 2000 + 10).toFixed(2),
       status: STATUSES[Math.floor(Math.random() * STATUSES.length)],
@@ -501,7 +501,7 @@ function routeDocument(doc) {
     const n = state.shardCount;
     if (key === 'customer_id') {
       const num = parseInt((doc.customer_id || '').replace('C', '')) || 0;
-      const segSize = Math.ceil(99999 / n);
+      const segSize = Math.ceil(999999 / n);
       return Math.min(Math.floor(num / segSize), n - 1);
     }
     if (key === 'order_date') {
@@ -522,8 +522,11 @@ function routeDocument(doc) {
     if (key === 'region') {
       const r = doc.region || 'americas';
       if (state.regionMode === 'multi') {
-        const map = { americas: 0, europe: 1, asia: 2 };
-        return Math.min(map[r] ?? 0, state.shardCount - 1);
+        if (r === 'europe') return Math.min(1, state.shardCount - 1);
+        if (r === 'asia') return Math.min(2, state.shardCount - 1);
+        // americas: split between shard 0 and shard 3 (DR) when 4 shards exist
+        if (state.shardCount >= 4) return fmix32(fnv32(String(doc._id))) % 2 === 0 ? 0 : 3;
+        return 0;
       }
       return fnv32(r) % state.shardCount;
     }
@@ -534,6 +537,8 @@ function routeDocument(doc) {
         const asiaCountries = new Set(['JP', 'SG', 'IN', 'AU', 'KR']);
         if (euCountries.has(c)) return Math.min(1, state.shardCount - 1);
         if (asiaCountries.has(c)) return Math.min(2, state.shardCount - 1);
+        // Americas: split between shard 0 and shard 3 (DR) when 4 shards exist
+        if (state.shardCount >= 4) return fmix32(fnv32(String(doc._id))) % 2 === 0 ? 0 : 3;
         return 0;
       }
       return fnv32(c) % state.shardCount;
@@ -596,7 +601,7 @@ function getRangeInfo(shardIdx) {
   const n = state.shardCount;
   if (state.strategy === 'range') {
     if (key === 'customer_id') {
-      const seg = Math.ceil(99999 / n);
+      const seg = Math.ceil(999999 / n);
       const min = pad(shardIdx * seg, 6);
       const max = shardIdx === n - 1 ? '999999' : pad((shardIdx + 1) * seg - 1, 6);
       return `customer_id: C${min} → C${max}`;
