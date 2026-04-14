@@ -287,7 +287,7 @@ input { font-family: inherit; font-size: inherit; }
   gap: 8px;
 }
 .config-row-label { font-size: 12px; color: var(--text-secondary); flex: 1; }
-.btn-group { display: flex; gap: 4px; }
+.btn-group { display: flex; gap: 4px; flex-shrink: 0; }
 .count-btn {
   background: var(--bg-card);
   border: 1.5px solid var(--border);
@@ -1471,7 +1471,7 @@ input { font-family: inherit; font-size: inherit; }
 /* Demo layout: controls (fixed) + viz (flex) */
 .bal-demo-layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 260px 1fr;
   gap: 16px;
   align-items: start;
 }

@@ -1869,7 +1869,7 @@ function renderBalancer() {
                 const desc = n === 128 ? 'Aggressive — fires after just 1 chunk difference'
                            : n === 384 ? 'MongoDB default — 3 × 128 MB chunkSize'
                            : 'Relaxed — 6 × chunkSize, tolerates large skew';
-                return `<button class="count-btn ${bSt.thresholdMB===n?'active':''}" data-btmb="${n}" data-tooltip="<strong>${mult} chunkSize threshold (${n} MB)</strong><br>${desc}">${mult} (${n} MB)</button>`;
+                return `<button class="count-btn ${bSt.thresholdMB===n?'active':''}" data-btmb="${n}" data-tooltip="<strong>${mult} chunkSize threshold (${n} MB)</strong><br>${desc}">${mult}</button>`;
               }).join('')}
             </div>
           </div>
