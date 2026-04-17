@@ -14,7 +14,8 @@ const state = {
   mongosCount: 1,
   documents: [],
   totalInserted: 0,
-  animationSpeed: 3,       // 1=slow … 5=fast
+  animationSpeed: 3,       // 1=slow … 5=fast (insert + topology)
+  routingSpeed: 3,         // 1=slow … 5=fast (query routing flow)
   isInserting: false,
   isBulkLoading: false,
 };
@@ -258,7 +259,11 @@ const QUERY_DEFS = {
       type: 'targeted',
       code: () => {
         const sk = state.shardKey;
-        const v = sk === 'email' ? '"alice@example.com"' : sk === 'user_id' ? '"a1b2c3d4-e5f6-4abc-8def-123456789abc"' : '"ObjectId(\\"6507abc123\\")}"';
+        const v = sk === 'email'
+          ? '"alice@example.com"'
+          : sk === 'user_id'
+            ? '"a1b2c3d4-e5f6-4abc-8def-123456789abc"'
+            : 'ObjectId("6507abc123")';
         return `db.users.find({ ${sk}: ${v} })`;
       },
       explain: () => `HASH(key) → SINGLE_SHARD_ROUTE → IXSCAN → RETURN`,
@@ -952,12 +957,17 @@ function buildChunkMap(shards) {
 function syntaxHighlight(code) {
   // Escape HTML first
   const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return escaped
-    .replace(/(\/\/[^\n]*)/g, '<span class="qe-comment">$1</span>')
-    .replace(/\b(db|find|aggregate|insertOne|updateOne|deleteOne|sort|limit|skip|distinct|count)\b/g, '<span class="qe-fn">$1</span>')
-    .replace(/(\$match|\$group|\$sort|\$limit|\$project|\$lookup|\$unwind|\$sum|\$gte|\$lte|\$gt|\$lt|\$in|\$nin|\$and|\$or|\$not|\$addToSet|\$first|\$last|\$avg|\$push|\$unwind)/g, '<span class="qe-op">$1</span>')
-    .replace(/"([^"<]*)"/g, '"<span class="qe-str">$1</span>"')
-    .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="qe-num">$1</span>');
+  // Single-pass tokenizer — each alternative is tried in order at every position.
+  // This prevents later passes from matching inside HTML we just inserted.
+  const TOKEN_RE = /(\/\/[^\n]*)|("(?:[^"\\]|\\.)*")|\b(db|find|aggregate|insertOne|updateOne|deleteOne|sort|limit|skip|distinct|count)\b|(\$[a-zA-Z_][a-zA-Z0-9_]*)|\b(\d+(?:\.\d+)?)\b/g;
+  return escaped.replace(TOKEN_RE, (m, comment, str, fn, op, num) => {
+    if (comment) return `<span class="qe-comment">${comment}</span>`;
+    if (str)     return `<span class="qe-str">${str}</span>`;
+    if (fn)      return `<span class="qe-fn">${fn}</span>`;
+    if (op)      return `<span class="qe-op">${op}</span>`;
+    if (num)     return `<span class="qe-num">${num}</span>`;
+    return m;
+  });
 }
 
 function setExecStatus(msg, cls) {
@@ -1031,7 +1041,8 @@ async function executeQueryAnimation() {
   const queryDef = queries.find(q => q.id === selectedId) || queries[0];
   const shards = getShards();
   const COLORS = ['#3B82F6', '#A855F7', '#F59E0B', '#EF4444'];
-  const delay = Math.max(80, 500 - state.animationSpeed * 80);
+  const speed = state.routingSpeed ?? state.animationSpeed;
+  const delay = Math.max(80, 500 - speed * 80);
 
   const btn = document.getElementById('qe-run-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span style="opacity:0.7">⏳</span> Running…'; }
@@ -1040,26 +1051,105 @@ async function executeQueryAnimation() {
   shards.forEach((_, i) => setExecRowState(i, 'state-idle', 'idle'));
   document.getElementById('qe-exec-summary').innerHTML = '';
   document.getElementById('qe-results').innerHTML = '<div class="qe-results-empty">Executing…</div>';
+  qfResetAll();
+  qfStepsReset();
 
-  setExecStatus('Planning query…', 'planning');
-  document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.add('active-routing'));
-  await sleep(delay * 0.8);
-  document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.remove('active-routing'));
+  const typeLabel = { targeted: 'Targeted', scatter: 'Scatter-Gather', partial: 'Partial' }[queryDef.type] || queryDef.type;
+  const shardNames = i => shards[i]?.rsName || `shard${i + 1}`;
 
   const targetShards = queryDef.getTargetShards();
   const skippedShards = shards.map((_, i) => i).filter(i => !targetShards.includes(i));
 
-  // Mark non-targeted shards as skipped immediately
+  // Dim non-target shards in the flow diagram up front
+  skippedShards.forEach(i => {
+    const n = document.getElementById(`qf-shard-${i}`);
+    if (n) n.classList.add('qf-dim');
+    const l = document.getElementById(`qf-line-shard-${i}`);
+    if (l) l.classList.add('qf-dim');
+  });
+
+  // ----- PHASE 1: Client → Mongos -----
+  setExecStatus('Planning query…', 'planning');
+  qfSetPhase('Client submits query → mongos', 'phase-plan');
+  qfStep('sends query over the wire to a <code>mongos</code> router', {
+    actor: 'client', actorColor: '#00ED64', variant: 'client',
+    detail: `query type: <strong>${typeLabel}</strong> · collection: <code>${STRATEGIES[state.strategy].collection}</code>`,
+  });
+  qfActivate('qf-client', delay * 0.6);
+  qfHighlightLine('qf-line-cm', '#00ED64', delay * 0.9);
+  await qfPacket('qf-client', 'qf-mongos', '#00ED64', delay * 0.85);
+  qfActivate('qf-mongos', delay * 0.6);
+  qfStep('receives connection, parses BSON, extracts shard-key predicate', {
+    actor: 'mongos', variant: 'mongos',
+    detail: `shard key: <code>${state.shardKey || '—'}</code>`,
+  });
+
+  // ----- PHASE 2: Mongos ↔ Config Server (consult chunk map) -----
+  qfSetPhase('mongos consults config server for chunk metadata', 'phase-meta');
+  qfStep('requests chunk map from the <strong>Config Server</strong>', {
+    actor: 'mongos', variant: 'meta',
+    detail: `reads <code>config.chunks</code> / <code>config.shards</code> (cached locally ~30s)`,
+  });
+  qfHighlightLine('qf-line-mc', '#F59E0B', delay * 1.4);
+  await qfPacket('qf-mongos', 'qf-config', '#F59E0B', delay * 0.65);
+  qfActivate('qf-config', delay * 0.8);
+  await sleep(delay * 0.2);
+  qfStep('returns chunk ranges and owning shards', {
+    actor: 'config server', variant: 'meta',
+    detail: `${shards.length} shards · ${shards.length * 2}+ chunks`,
+  });
+  await qfPacket('qf-config', 'qf-mongos', '#F59E0B', delay * 0.65);
+  qfActivate('qf-mongos', delay * 0.5);
+
+  document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.add('active-routing'));
+  await sleep(delay * 0.3);
+  document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.remove('active-routing'));
+
+  // Plan step: decide targeting
+  const planMsg = targetShards.length === 1
+    ? `resolves predicate to a single chunk → routes to <strong>${shardNames(targetShards[0])}</strong>`
+    : targetShards.length === shards.length
+      ? `predicate lacks shard-key prefix → <strong>scatter-gather</strong> to all ${shards.length} shards`
+      : `predicate spans ${targetShards.length} chunk ranges → <strong>partial broadcast</strong> to ${targetShards.length} of ${shards.length} shards`;
+  qfStep(planMsg, {
+    actor: 'mongos', variant: 'plan',
+    detail: `targets: ${targetShards.map(i => `<code style="color:${COLORS[i % 4]}">${shardNames(i)}</code>`).join(', ')}${skippedShards.length ? ` · skips: ${skippedShards.map(shardNames).join(', ')}` : ''}`,
+  });
+
+  // Mark non-targeted shards as skipped on the exec table
   skippedShards.forEach(i => setExecRowState(i, 'state-skipped', 'skipped'));
 
+  // ----- PHASE 3: Mongos → target shards (dispatch) -----
+  const phaseLabel = targetShards.length === 1
+    ? `Targeted routing → 1 shard`
+    : `Scatter to ${targetShards.length} shards`;
   setExecStatus(`Routing to ${targetShards.length} shard(s)…`, 'routing');
-  await sleep(delay * 0.4);
+  qfSetPhase(phaseLabel, 'phase-dispatch');
+  qfStep(`dispatches query to ${targetShards.length} shard${targetShards.length !== 1 ? 's' : ''} in parallel`, {
+    actor: 'mongos', variant: 'dispatch',
+    detail: `fan-out over ${targetShards.length} persistent connection${targetShards.length !== 1 ? 's' : ''}`,
+  });
 
-  // Execute on target shards (parallel with slight stagger for visual clarity)
+  await Promise.all(targetShards.map(async (shardIdx, i) => {
+    await sleep(i * delay * 0.15);
+    const color = COLORS[shardIdx % 4];
+    qfHighlightLine(`qf-line-shard-${shardIdx}`, color, delay * 1.1);
+    qfPacket('qf-mongos', `qf-shard-${shardIdx}`, color, delay * 0.8);
+  }));
+  await sleep(delay * 0.85);
+
+  // ----- PHASE 4: Shards execute in parallel -----
+  qfSetPhase(
+    targetShards.length === 1
+      ? 'Shard executes query against its local data'
+      : 'Each target shard executes the query in parallel',
+    'phase-exec'
+  );
   const results = {};
   await Promise.all(targetShards.map(async (shardIdx, i) => {
-    await sleep(i * delay * 0.2);   // slight stagger
+    await sleep(i * delay * 0.2);
     setExecRowState(shardIdx, 'state-executing', 'executing');
+    qfActivate(`qf-shard-${shardIdx}`, delay * 1.1, COLORS[shardIdx % 4]);
     const card = document.getElementById(`shard-card-${shardIdx}`);
     if (card) card.classList.add('active-routing');
 
@@ -1072,13 +1162,46 @@ async function executeQueryAnimation() {
     if (card) card.classList.remove('active-routing');
     results[shardIdx] = { matched, examined: shardDocs.length, latencyMs };
     setExecRowDone(shardIdx, matched.length, shardDocs.length, latencyMs, COLORS[shardIdx % 4]);
+
+    qfStep(`executes on primary, scans ${shardDocs.length} docs, matches <strong>${matched.length}</strong>`, {
+      actor: shardNames(shardIdx), actorColor: COLORS[shardIdx % 4], variant: 'exec',
+      detail: `${queryDef.isAggregate ? 'partial $group/$match' : 'IXSCAN/COLLSCAN'} · ${latencyMs} ms on-shard`,
+    });
   }));
 
-  // Merge phase for multi-shard
+  // ----- PHASE 5: Shards → Mongos (return partial results) -----
+  qfSetPhase(
+    targetShards.length === 1
+      ? 'Shard returns results to mongos'
+      : 'Shards return partial results to mongos',
+    'phase-return'
+  );
+  await Promise.all(targetShards.map(async (shardIdx, i) => {
+    await sleep(i * delay * 0.1);
+    const color = COLORS[shardIdx % 4];
+    qfHighlightLine(`qf-line-shard-${shardIdx}`, color, delay * 0.9);
+    const matchedCount = results[shardIdx]?.matched?.length || 0;
+    qfPacket(`qf-shard-${shardIdx}`, 'qf-mongos', color, delay * 0.8, {
+      label: matchedCount > 0 ? `${matchedCount}` : '',
+    });
+  }));
+  await sleep(delay * 0.85);
+  qfActivate('qf-mongos', delay * 0.8);
+  qfStep(`receives partial results from ${targetShards.length} shard${targetShards.length !== 1 ? 's' : ''}`, {
+    actor: 'mongos', variant: 'return',
+    detail: targetShards.map(i => `<code style="color:${COLORS[i % 4]}">${shardNames(i)}: ${results[i]?.matched?.length || 0}</code>`).join(' · '),
+  });
+
+  // ----- PHASE 6: Merge at mongos (multi-shard only) -----
   if (targetShards.length > 1) {
     setExecStatus('Merging results at mongos…', 'merging');
+    qfSetPhase('mongos merges partial results (sort / limit / dedupe)', 'phase-merge');
+    qfStep(`merges partial results${queryDef.isAggregate ? ' and runs final $group/$sort stage' : ' (merge-sort, apply limit/skip)'}`, {
+      actor: 'mongos', variant: 'merge',
+      detail: `combined ${targetShards.reduce((s, i) => s + (results[i]?.matched?.length || 0), 0)} docs from ${targetShards.length} shards`,
+    });
     document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.add('active-routing'));
-    await sleep(delay * 0.5);
+    await sleep(delay * 0.7);
     document.querySelectorAll('.node-card.mongos').forEach(n => n.classList.remove('active-routing'));
   }
 
@@ -1087,6 +1210,20 @@ async function executeQueryAnimation() {
   const totalExamined = targetShards.reduce((s, i) => s + (results[i]?.examined || 0), 0);
   const maxLatency = Math.max(...targetShards.map(i => results[i]?.latencyMs || 0));
   const totalLatency = maxLatency + (targetShards.length > 1 ? 2 + Math.floor(Math.random() * 6) : 0);
+
+  // ----- PHASE 7: Mongos → Client (final results) -----
+  qfSetPhase(`mongos returns ${allDocs.length} document${allDocs.length !== 1 ? 's' : ''} to client`, 'phase-done');
+  qfHighlightLine('qf-line-cm', '#E6EDF3', delay * 1.0);
+  await qfPacket('qf-mongos', 'qf-client', '#E6EDF3', delay * 0.85, {
+    label: allDocs.length > 0 ? `${allDocs.length}` : '0',
+  });
+  qfActivate('qf-client', delay * 0.7, '#00ED64');
+
+  qfStep(`returns <strong>${allDocs.length}</strong> document${allDocs.length !== 1 ? 's' : ''} to client · total ${totalLatency} ms`, {
+    actor: 'mongos', variant: 'done',
+    detail: `examined ${totalExamined} · returned ${allDocs.length} · shards hit ${targetShards.length}/${state.shardCount}`,
+  });
+  qfStepsDone();
 
   setExecStatus(`${allDocs.length} doc${allDocs.length !== 1 ? 's' : ''} returned`, 'done');
 
@@ -1163,6 +1300,273 @@ function updateQueryExecutorDisplay() {
   if (summary) summary.innerHTML = '';
   if (results) results.innerHTML = '<div class="qe-results-empty">Select a query above and click Execute to run it across shards.</div>';
   setExecStatus('Ready', '');
+  qfResetAll();
+  qfSetPhase('Idle — click Execute to animate the query flow.', '');
+  qfStepsIdle();
+}
+
+// ===== QUERY FLOW DIAGRAM =====
+
+function renderFlowDiagram(shards, COLORS) {
+  const shardCount = shards.length;
+  const W = 860;
+  const H = Math.max(280, 140 + shardCount * 56);
+
+  // Node layout (px)
+  const CLIENT_X = 30,  CLIENT_W  = 120, CLIENT_H  = 60;
+  const MONGOS_X = 330, MONGOS_W  = 150, MONGOS_H  = 70;
+  const CONFIG_X = 342, CONFIG_W  = 130, CONFIG_H  = 50;
+  const SHARD_X  = 680, SHARD_W   = 150, SHARD_H   = 50;
+
+  const clientY = (H - CLIENT_H) / 2;
+  const mongosY = (H - MONGOS_H) / 2;
+  const configY = 12;
+
+  const usableH = H - 40;
+  const shardGap = usableH / (shardCount + 1);
+  const shardNodes = shards.map((s, i) => ({
+    idx: i,
+    x: SHARD_X,
+    y: 20 + shardGap * (i + 1) - SHARD_H / 2,
+    w: SHARD_W,
+    h: SHARD_H,
+    shard: s,
+  }));
+
+  // Connector coordinates (center-to-edge)
+  const cmX1 = CLIENT_X + CLIENT_W, cmY1 = clientY + CLIENT_H / 2;
+  const cmX2 = MONGOS_X,            cmY2 = mongosY + MONGOS_H / 2;
+  const mcX  = MONGOS_X + MONGOS_W / 2;
+  const mcY1 = mongosY, mcY2 = configY + CONFIG_H;
+
+  const svgLines = [
+    `<line class="qf-line" id="qf-line-cm" x1="${cmX1}" y1="${cmY1}" x2="${cmX2}" y2="${cmY2}" />`,
+    `<line class="qf-line qf-line-dashed" id="qf-line-mc" x1="${mcX}" y1="${mcY1}" x2="${mcX}" y2="${mcY2}" />`,
+    ...shardNodes.map(n => {
+      const sx = MONGOS_X + MONGOS_W;
+      const sy = mongosY + MONGOS_H / 2;
+      const ex = n.x;
+      const ey = n.y + n.h / 2;
+      return `<line class="qf-line qf-line-shard" id="qf-line-shard-${n.idx}" data-shard="${n.idx}" x1="${sx}" y1="${sy}" x2="${ex}" y2="${ey}" />`;
+    }),
+  ].join('');
+
+  const clientNode = `
+    <div class="qf-node qf-client" id="qf-client" style="left:${CLIENT_X}px;top:${clientY}px;width:${CLIENT_W}px;height:${CLIENT_H}px">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+      </svg>
+      <div class="qf-node-label">Client / App</div>
+      <div class="qf-node-sub">driver</div>
+    </div>`;
+
+  const mongosNode = `
+    <div class="qf-node qf-mongos" id="qf-mongos" style="left:${MONGOS_X}px;top:${mongosY}px;width:${MONGOS_W}px;height:${MONGOS_H}px">
+      <div class="qf-node-title">mongos</div>
+      <div class="qf-node-label">Query Router</div>
+      <div class="qf-node-sub">stateless · routes &amp; merges</div>
+    </div>`;
+
+  const configNode = `
+    <div class="qf-node qf-config" id="qf-config" style="left:${CONFIG_X}px;top:${configY}px;width:${CONFIG_W}px;height:${CONFIG_H}px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>
+      </svg>
+      <div class="qf-node-label">Config Server</div>
+      <div class="qf-node-sub">chunk map</div>
+    </div>`;
+
+  const shardNodesHTML = shardNodes.map(n => {
+    const color = COLORS[n.idx % COLORS.length];
+    return `
+      <div class="qf-node qf-shard" id="qf-shard-${n.idx}" data-shard="${n.idx}"
+           style="left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px;--shard-color:${color}">
+        <div class="qf-shard-dot" style="background:${color}"></div>
+        <div class="qf-shard-body">
+          <div class="qf-node-label">${n.shard.rsName}</div>
+          <div class="qf-node-sub">${n.shard.docCount} docs</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const legend = `
+    <div class="qf-legend">
+      <span class="qf-legend-item"><span class="qf-swatch" style="background:#00ED64"></span>query</span>
+      <span class="qf-legend-item"><span class="qf-swatch" style="background:#F59E0B"></span>metadata</span>
+      <span class="qf-legend-item"><span class="qf-swatch qf-swatch-multi"></span>per-shard payload</span>
+      <span class="qf-legend-item"><span class="qf-swatch" style="background:#E6EDF3"></span>merged results</span>
+    </div>`;
+
+  const phaseLabel = `<div class="qf-phase" id="qf-phase"><span class="qf-phase-dot"></span><span id="qf-phase-text">Idle — click Execute to animate the query flow.</span></div>`;
+
+  const stepsPanel = `
+    <div class="qf-steps-panel" id="qf-steps-panel">
+      <div class="qf-steps-header">
+        <span>Execution Steps</span>
+        <span class="qf-steps-timer" id="qf-steps-timer">—</span>
+      </div>
+      <ol class="qf-steps-list" id="qf-steps-list">
+        <li class="qf-steps-empty">Click <strong>Execute</strong> to see the step-by-step flow through mongos, config server, and shards.</li>
+      </ol>
+    </div>`;
+
+  return `
+    <div class="qe-flow-wrap">
+      <div class="qe-flow-header">
+        <span>Query Flow</span>
+        ${legend}
+      </div>
+      <div class="qe-flow-scroll">
+        <div class="qe-flow" id="qe-flow" style="width:${W}px;height:${H}px">
+          <svg class="qe-flow-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+            <defs>
+              <marker id="qf-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+              </marker>
+            </defs>
+            ${svgLines}
+          </svg>
+          ${clientNode}
+          ${configNode}
+          ${mongosNode}
+          ${shardNodesHTML}
+        </div>
+      </div>
+      ${phaseLabel}
+      ${stepsPanel}
+    </div>`;
+}
+
+function qfSetPhase(text, cls) {
+  const el = document.getElementById('qf-phase');
+  const txt = document.getElementById('qf-phase-text');
+  if (txt) txt.textContent = text;
+  if (el) el.className = `qf-phase ${cls || ''}`;
+}
+
+function qfActivate(nodeId, durationMs, colorHint) {
+  const el = document.getElementById(nodeId);
+  if (!el) return;
+  el.classList.add('qf-active');
+  if (colorHint) el.style.setProperty('--qf-pulse', colorHint);
+  setTimeout(() => {
+    el.classList.remove('qf-active');
+    el.style.removeProperty('--qf-pulse');
+  }, durationMs);
+}
+
+function qfHighlightLine(lineId, color, durationMs) {
+  const el = document.getElementById(lineId);
+  if (!el) return;
+  el.classList.add('qf-line-active');
+  if (color) el.style.stroke = color;
+  setTimeout(() => {
+    el.classList.remove('qf-line-active');
+    el.style.stroke = '';
+  }, durationMs);
+}
+
+function qfPacket(fromId, toId, color, durationMs, opts = {}) {
+  return new Promise(resolve => {
+    const container = document.getElementById('qe-flow');
+    const from = document.getElementById(fromId);
+    const to = document.getElementById(toId);
+    if (!container || !from || !to) { setTimeout(resolve, durationMs); return; }
+
+    const cRect = container.getBoundingClientRect();
+    const fRect = from.getBoundingClientRect();
+    const tRect = to.getBoundingClientRect();
+
+    const sx = fRect.left - cRect.left + fRect.width / 2;
+    const sy = fRect.top - cRect.top + fRect.height / 2;
+    const ex = tRect.left - cRect.left + tRect.width / 2;
+    const ey = tRect.top - cRect.top + tRect.height / 2;
+
+    const p = document.createElement('div');
+    p.className = 'qf-packet';
+    if (opts.label) {
+      p.textContent = opts.label;
+      p.classList.add('qf-packet-labeled');
+    }
+    p.style.background = color;
+    p.style.boxShadow = `0 0 10px ${color}`;
+    p.style.left = `${sx}px`;
+    p.style.top = `${sy}px`;
+    container.appendChild(p);
+
+    // Force a reflow so the transition engages
+    void p.offsetWidth;
+    p.style.transition = `transform ${durationMs}ms cubic-bezier(0.4, 0, 0.2, 1), opacity ${durationMs}ms`;
+    p.style.transform = `translate(${ex - sx}px, ${ey - sy}px)`;
+
+    setTimeout(() => { p.style.opacity = '0'; }, Math.max(0, durationMs - 80));
+    setTimeout(() => { p.remove(); resolve(); }, durationMs + 40);
+  });
+}
+
+function qfResetAll() {
+  document.querySelectorAll('#qe-flow .qf-packet').forEach(n => n.remove());
+  document.querySelectorAll('#qe-flow .qf-node').forEach(n => {
+    n.classList.remove('qf-active', 'qf-dim');
+    n.style.removeProperty('--qf-pulse');
+  });
+  document.querySelectorAll('#qe-flow .qf-line').forEach(n => {
+    n.classList.remove('qf-line-active');
+    n.style.stroke = '';
+  });
+}
+
+// ----- Step-by-step execution log -----
+let qfStepSeq = 0;
+let qfRunStart = 0;
+
+function qfStepsReset() {
+  qfStepSeq = 0;
+  qfRunStart = performance.now();
+  const list = document.getElementById('qf-steps-list');
+  const timer = document.getElementById('qf-steps-timer');
+  if (list) list.innerHTML = '';
+  if (timer) timer.textContent = '0 ms';
+}
+
+function qfStepsIdle() {
+  qfStepSeq = 0;
+  qfRunStart = 0;
+  const list = document.getElementById('qf-steps-list');
+  const timer = document.getElementById('qf-steps-timer');
+  if (list) list.innerHTML = `<li class="qf-steps-empty">Click <strong>Execute</strong> to see the step-by-step flow through mongos, config server, and shards.</li>`;
+  if (timer) timer.textContent = '—';
+}
+
+function qfStep(text, opts = {}) {
+  const list = document.getElementById('qf-steps-list');
+  const timer = document.getElementById('qf-steps-timer');
+  if (!list) return;
+  qfStepSeq++;
+  const elapsed = qfRunStart ? Math.round(performance.now() - qfRunStart) : 0;
+  if (timer) timer.textContent = `${elapsed} ms`;
+
+  const li = document.createElement('li');
+  li.className = `qf-step ${opts.variant ? 'qf-step-' + opts.variant : ''}`;
+  const actor = opts.actor ? `<span class="qf-step-actor" style="${opts.actorColor ? `color:${opts.actorColor}` : ''}">${opts.actor}</span>` : '';
+  const detail = opts.detail ? `<span class="qf-step-detail">${opts.detail}</span>` : '';
+  li.innerHTML = `
+    <span class="qf-step-num">${qfStepSeq}</span>
+    <div class="qf-step-body">
+      <div class="qf-step-text">${actor}<span class="qf-step-action">${text}</span></div>
+      ${detail}
+    </div>
+    <span class="qf-step-time">+${elapsed}ms</span>`;
+  list.appendChild(li);
+  list.scrollTop = list.scrollHeight;
+}
+
+function qfStepsDone() {
+  const timer = document.getElementById('qf-steps-timer');
+  if (timer && qfRunStart) {
+    const total = Math.round(performance.now() - qfRunStart);
+    timer.textContent = `done · ${total} ms`;
+  }
 }
 
 // ===== QUERY ROUTING VIEW =====
@@ -1178,11 +1582,11 @@ function renderQueryRouting() {
   const typeLabels = { targeted: 'Targeted', scatter: 'Scatter-Gather', partial: 'Partial' };
   const typeClasses = { targeted: 'qe-badge-targeted', scatter: 'qe-badge-scatter', partial: 'qe-badge-partial' };
 
-  // Build select options — show condensed single-line query code
+  // Build select options — use the friendly query name; aggregation pipelines are
+  // unreadable when condensed to a single line, so show q.name instead.
   const TYPE_ICONS = { targeted: '●', scatter: '◎', partial: '◑' };
   const options = queries.map(q => {
-    const condensed = q.code().replace(/\s+/g, ' ').trim();
-    return `<option value="${q.id}">${TYPE_ICONS[q.type] || '○'} ${condensed}</option>`;
+    return `<option value="${q.id}">${TYPE_ICONS[q.type] || '○'} ${q.name}</option>`;
   }).join('');
 
   // Build exec rows for current shards
@@ -1247,6 +1651,11 @@ function renderQueryRouting() {
           <span class="qe-label">Query</span>
           <select id="qe-select" class="qe-select">${options}</select>
         </div>
+        <div class="qe-speed-control" data-tooltip="<strong>Animation Speed</strong><br>Controls how fast packets travel between client, mongos, config server, and shards. Does not affect real query semantics.">
+          <span class="qe-label">Speed</span>
+          <input type="range" id="qe-speed-slider" class="qe-speed-slider" min="1" max="5" step="1" value="${state.routingSpeed ?? state.animationSpeed}">
+          <span class="qe-speed-label" id="qe-speed-label">${['Very Slow','Slow','Normal','Fast','Very Fast'][(state.routingSpeed ?? state.animationSpeed) - 1] || 'Normal'}</span>
+        </div>
         <button id="qe-run-btn" class="btn-primary qe-run-btn">&#9654; Execute</button>
       </div>
 
@@ -1268,6 +1677,9 @@ function renderQueryRouting() {
         </div>
         <span class="qe-plan-explain" id="qe-plan-explain">${firstQuery.explanation}</span>
       </div>
+
+      <!-- Visual flow diagram -->
+      ${renderFlowDiagram(shards, COLORS)}
 
       <!-- Execution table -->
       <div class="qe-exec-panel">
@@ -1620,10 +2032,12 @@ function initEventListeners() {
       tab.classList.add('active');
       document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
 
-      // Hide irrelevant sidebar sections when balancer tab is active
+      // Hide irrelevant sidebar sections when balancer or limitations tab is active
       const isBalancer = tab.dataset.tab === 'balancer';
+      const isLimitations = tab.dataset.tab === 'limitations';
+      const hideSidebar = isBalancer || isLimitations;
       document.querySelectorAll('.strategy-section, .shardkey-section, .region-section, .cluster-section, .datasim-section')
-        .forEach(s => s.classList.toggle('hidden-section', isBalancer));
+        .forEach(s => s.classList.toggle('hidden-section', hideSidebar));
 
       updateHeaderStats();
 
@@ -1649,6 +2063,17 @@ function initEventListeners() {
   // Query executor — execute button (delegated since panel re-renders)
   document.getElementById('routing-panel').addEventListener('click', e => {
     if (e.target.closest('#qe-run-btn')) executeQueryAnimation();
+  });
+
+  // Query executor — speed slider (delegated so it survives panel re-renders)
+  document.getElementById('routing-panel').addEventListener('input', e => {
+    if (e.target.id !== 'qe-speed-slider') return;
+    const v = parseInt(e.target.value, 10);
+    state.routingSpeed = v;
+    const labelEl = document.getElementById('qe-speed-label');
+    if (labelEl) {
+      labelEl.textContent = ['Very Slow','Slow','Normal','Fast','Very Fast'][v - 1] || 'Normal';
+    }
   });
 
   // Keyboard shortcut: Space to insert; Enter when routing tab active to execute query

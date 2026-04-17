@@ -158,6 +158,7 @@
         <button class="view-tab" data-tab="distribution" data-tooltip="<strong>Data Distribution</strong><br>Bar charts showing how documents are spread across shards. Hashed sharding should produce near-equal bars; range sharding may skew based on key values.">Data Distribution</button>
         <button class="view-tab" data-tab="routing" data-tooltip="<strong>Query Routing</strong><br>Run example queries and watch mongos decide which shards to contact. <em>Targeted</em> queries hit 1 shard; <em>scatter-gather</em> queries fan out to all shards.">Query Routing</button>
         <button class="view-tab" data-tab="balancer" data-tooltip="<strong>Load Balancer</strong><br>The balancer is a background thread on the config server primary that monitors data size per shard and migrates chunks to equalise the distribution.">Load Balancer</button>
+        <button class="view-tab" data-tab="limitations" data-tooltip="<strong>Limitations & Challenges</strong><br>In-depth technical limitations of each sharding strategy (range, hash, zone) and operational challenges across Atlas auto-sharding, Atlas self-managed, and Enterprise Advanced deployments.">Limitations</button>
       </div>
 
       <!-- Topology View -->
@@ -187,6 +188,168 @@
       <!-- Load Balancer View -->
       <div class="tab-content" id="tab-balancer">
         <div class="balancer-panel" id="balancer-panel"></div>
+      </div>
+
+      <!-- Limitations View -->
+      <div class="tab-content" id="tab-limitations">
+        <div class="limitations-panel">
+          <div class="lim-intro">
+            <h3>Sharding Limitations & Operational Challenges</h3>
+            <p>Sharding unlocks horizontal scale, but each strategy and deployment model carries trade-offs that surface at scale. The sections below summarize the technical constraints engineers most often hit in production.</p>
+          </div>
+
+          <!-- ===== Strategy Limitations ===== -->
+          <h4 class="lim-group-title">Sharding Strategy Limitations</h4>
+          <div class="lim-strategy-grid">
+
+            <!-- Range -->
+            <section class="lim-card lim-card-range">
+              <header class="lim-card-head">
+                <div class="lim-card-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="6" height="18" rx="1"/>
+                    <rect x="10" y="3" width="6" height="14" rx="1"/>
+                    <rect x="17" y="3" width="4" height="10" rx="1"/>
+                  </svg>
+                </div>
+                <div>
+                  <h5>Range Sharding</h5>
+                  <span class="lim-card-sub">Contiguous key ranges per chunk</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Monotonic-key hotspots.</strong> Ever-increasing keys (ObjectId, timestamps, auto-increment) route every write to the shard owning <code>MaxKey</code>, nullifying write parallelism until a split occurs.</li>
+                <li><strong>Jumbo chunks.</strong> When many documents share the same shard-key value, chunks exceed <code>chunkSize</code> (default 128 MB) and cannot be split — balancer refuses to migrate them.</li>
+                <li><strong>Bulk-load migration storms.</strong> Loading pre-sorted data creates new chunks on one shard faster than the balancer can migrate them, so imports complete unbalanced and then thrash for hours.</li>
+                <li><strong>Cardinality &amp; frequency pitfalls.</strong> Low-cardinality keys (e.g. <code>status</code>, <code>country</code>) cap the number of possible chunks; high-frequency values create unsplittable jumbo chunks.</li>
+                <li><strong>Full-range scatter-gather.</strong> Range predicates that span most of the key domain still broadcast to every shard — the "range query efficiency" benefit only applies to narrow windows.</li>
+                <li><strong>Expensive shard-key changes.</strong> <code>reshardCollection</code> requires ~1.2× collection size in free disk, re-writes every document, and pauses writes briefly at cutover.</li>
+              </ul>
+            </section>
+
+            <!-- Hashed -->
+            <section class="lim-card lim-card-hashed">
+              <header class="lim-card-head">
+                <div class="lim-card-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 8h16M4 16h16M8 4l-2 16M14 4l2 16"/>
+                  </svg>
+                </div>
+                <div>
+                  <h5>Hashed Sharding</h5>
+                  <span class="lim-card-sub">Uniform hash-based distribution</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Range queries become broadcast.</strong> Any <code>$gt</code>/<code>$lt</code>/<code>$gte</code>/<code>$lte</code> on the shard key fans out to all shards; mongos cannot prune by range.</li>
+                <li><strong>Sorts require merge at router.</strong> <code>$sort</code> on the shard key loses natural ordering — mongos must merge-sort results from every shard, limiting streaming performance.</li>
+                <li><strong>Compound-range indexes limited.</strong> The hashed field cannot participate in a compound index as a range — only equality lookups remain efficient.</li>
+                <li><strong>Zone sharding compatibility.</strong> Zone ranges on hashed keys are opaque (hash values, not natural values), so geo/compliance tagging is awkward to reason about and maintain.</li>
+                <li><strong>Low-cardinality skew.</strong> Hashing a field with few distinct values still produces few distinct hash buckets — distribution degrades toward the underlying cardinality.</li>
+                <li><strong>Pre-splitting requires foresight.</strong> Without initial chunk pre-splits, new collections start on a single shard and rely on the balancer to catch up during ingest.</li>
+              </ul>
+            </section>
+
+            <!-- Zone -->
+            <section class="lim-card lim-card-zone">
+              <header class="lim-card-head">
+                <div class="lim-card-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h5>Zone Sharding</h5>
+                  <span class="lim-card-sub">Tag-based locality &amp; residency</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Shard key must carry the zone discriminator.</strong> The tagging field (e.g. <code>country</code>, <code>region</code>) has to be a <em>prefix</em> of the shard key — retrofitting zones onto an existing shard key often requires resharding.</li>
+                <li><strong>Enforcement is eventual, not immediate.</strong> Documents written with out-of-zone keys are accepted first and migrated later — residency compliance has a window of violation until the balancer catches up.</li>
+                <li><strong>Cross-zone balancer churn.</strong> Adding, removing, or retagging a zone can trigger TB-scale chunk migrations that saturate the inter-region link and backpressure application writes.</li>
+                <li><strong>Ambiguous overlaps.</strong> A shard assigned to multiple zones, or zones with overlapping ranges, produces non-deterministic placement decisions that are hard to debug.</li>
+                <li><strong>Cross-zone queries scatter-gather.</strong> Queries without the zone prefix in the predicate fan out to every shard, erasing the locality benefit.</li>
+                <li><strong>Capacity planning is manual.</strong> Hot zones (e.g. NA-East during business hours) are not auto-scaled — the operator must provision shards per zone by forecast.</li>
+                <li><strong>Tiered-storage zones still manual.</strong> Using zones for hot/cold tiering (SSD vs HDD shards) requires custom TTL-driven field updates to migrate aging data.</li>
+              </ul>
+            </section>
+
+          </div>
+
+          <!-- ===== Deployment Model Limitations ===== -->
+          <h4 class="lim-group-title">Deployment Model Challenges</h4>
+          <div class="lim-deploy-grid">
+
+            <!-- Atlas Automatic -->
+            <section class="lim-card lim-card-deploy">
+              <header class="lim-card-head lim-card-head-deploy">
+                <div class="lim-badge lim-badge-atlas">Atlas</div>
+                <div>
+                  <h5>Atlas Automatic Sharding</h5>
+                  <span class="lim-card-sub">Global Clusters &amp; managed zone sharding</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Tier floor.</strong> Sharded clusters require M30+ (M10/M20 are replica-set only), establishing a meaningful cost floor before you can shard at all.</li>
+                <li><strong>Compound shard key is mandatory.</strong> Global Clusters require a composite key of <code>{location, customKey}</code> — application code must supply the location field on every write.</li>
+                <li><strong>Shard key &amp; zone mapping are semi-immutable.</strong> Although <code>reshardCollection</code> is available, changing the Global Cluster zone topology often requires a new cluster and an app-coordinated migration.</li>
+                <li><strong>"Automatic" = balancer, not key selection.</strong> Atlas does not choose your shard key or detect hotspots — a poor key still produces a pathological cluster.</li>
+                <li><strong>Limited balancer-window control.</strong> You can configure balancing windows but not per-collection priorities or migration parallelism like self-managed.</li>
+                <li><strong>Backups are slower &amp; larger.</strong> Sharded cluster snapshots coordinate across shards; restores are non-trivial and take markedly longer than replica-set restores.</li>
+                <li><strong>Feature restrictions.</strong> Queryable Encryption, Atlas Search, and Vector Search each have documented constraints on sharded collections (shard-key requirements, consistency, index placement).</li>
+                <li><strong>Cross-region egress cost.</strong> Multi-region Global Clusters incur per-GB cloud egress on every migration and cross-zone query — easy to under-estimate.</li>
+              </ul>
+            </section>
+
+            <!-- Atlas Self Managed -->
+            <section class="lim-card lim-card-deploy">
+              <header class="lim-card-head lim-card-head-deploy">
+                <div class="lim-badge lim-badge-self">Atlas</div>
+                <div>
+                  <h5>Atlas Self-Managed Sharding</h5>
+                  <span class="lim-card-sub">Atlas dedicated clusters, operator-driven shard design</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Shard-key ownership is yours.</strong> Atlas hosts the infrastructure, but poor key choice (low cardinality, monotonic, or frequency-skewed) still produces jumbo chunks and hotspots.</li>
+                <li><strong>Resharding is online but costly.</strong> <code>reshardCollection</code> peaks at roughly 2× collection storage and doubles IOPS for the duration — capacity headroom must be planned.</li>
+                <li><strong>Rolling shard replacements.</strong> Vertically scaling a shard tier is a rolling replica-set replacement — each shard takes minutes-to-hours depending on data size.</li>
+                <li><strong>Config metadata bloat.</strong> <code>config.changelog</code> and <code>config.chunks</code> grow without TTL; long-lived clusters accumulate millions of chunk rows that slow balancer decisions.</li>
+                <li><strong>Mongos connection limits.</strong> Each mongos caps at ~64k connections (often less in practice); high-concurrency apps must deploy multiple routers and manage connection-pool fan-out.</li>
+                <li><strong>Cross-shard transactions.</strong> Multi-shard <code>startTransaction</code> involves two-phase commit — latency rises sharply and abort rates climb under contention (lock timeouts default to 5 s).</li>
+                <li><strong>Change-stream ordering caveats.</strong> Cluster-wide change streams do not guarantee total order across shards; consumers must tolerate per-shard causal ordering.</li>
+                <li><strong>$lookup / $graphLookup restrictions.</strong> Joining against a sharded foreign collection has specific rules (must be on mongos, uses merge-on-router) that constrain aggregation pipelines.</li>
+                <li><strong>16 MB BSON limit unchanged.</strong> Sharding increases aggregate capacity but does not raise the per-document limit — large blobs still require GridFS or external object storage.</li>
+              </ul>
+            </section>
+
+            <!-- Enterprise Advanced -->
+            <section class="lim-card lim-card-deploy">
+              <header class="lim-card-head lim-card-head-deploy">
+                <div class="lim-badge lim-badge-ea">EA</div>
+                <div>
+                  <h5>Enterprise Advanced Sharding</h5>
+                  <span class="lim-card-sub">Self-hosted MongoDB Enterprise</span>
+                </div>
+              </header>
+              <ul class="lim-list">
+                <li><strong>Full operational burden.</strong> You run config-server replica sets, every shard replica set, the mongos fleet, monitoring, alerting, and backup infrastructure end-to-end.</li>
+                <li><strong>Ops Manager is effectively required.</strong> At shard count &gt; ~3, manual orchestration of upgrades, backups, and parameter changes becomes infeasible — Ops Manager (or Cloud Manager) adds its own infrastructure footprint.</li>
+                <li><strong>Per-component security config.</strong> LDAP/Kerberos/x.509, KMIP for encryption-at-rest, and auditing must be configured on every mongod and mongos independently — drift is common.</li>
+                <li><strong>Backups coordinate across shards.</strong> Point-in-time restores of a sharded cluster require the Ops Manager Backup Daemon (or equivalent) with storage equal to multiples of cluster size for oplog retention.</li>
+                <li><strong>Version-upgrade ordering.</strong> Upgrades must proceed config servers → shards → mongos, one FCV step at a time; skip-version upgrades are not supported and require stepping through.</li>
+                <li><strong>Shard add/remove is manual &amp; slow.</strong> <code>removeShard</code> drains chunks one-at-a-time; draining a 10 TB shard can run for days and must be monitored continuously.</li>
+                <li><strong>Rolling restart multiplier.</strong> A patch window for N shards × R replicas × M mongos means dozens of sequential restarts — maintenance windows compound with cluster size.</li>
+                <li><strong>No built-in residency guardrails.</strong> Zone rules are advisory configuration; there is no enforcement layer to prevent an operator from misassigning tags or an app from writing out-of-zone data.</li>
+                <li><strong>Audit volume.</strong> Per-mongos audit logs at high QPS can exceed 100 GB/day; central collection and SIEM forwarding must be engineered separately.</li>
+                <li><strong>Heterogeneous hardware pitfalls.</strong> The balancer equalizes by data size, not capacity — mixing shards with different disk/CPU profiles leaves the weakest shard as the bottleneck.</li>
+                <li><strong>Hardware refresh cycles.</strong> Every 3–5 years you replace nodes at the OS level; on a 20-shard cluster that is a multi-quarter program of rolling replica-set replacements.</li>
+              </ul>
+            </section>
+
+          </div>
+        </div>
       </div>
     </main>
   </div>
