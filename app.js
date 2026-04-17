@@ -825,13 +825,9 @@ function buildNodeList(s) {
   const n = state.nodesPerShard;
   const nodes = [];
   nodes.push({ role: 'PRIMARY', name: `${s.name}-p1`, dot: 'dot-primary', badge: 'badge-primary' });
-  const secCount = n <= 1 ? 0 : n === 5 ? 4 : n - 1;
+  const secCount = n <= 1 ? 0 : n - 1;
   for (let i = 0; i < secCount; i++) {
-    if (n === 5 && i === 3) {
-      nodes.push({ role: 'ARBITER', name: `${s.name}-arb`, dot: 'dot-arbiter', badge: 'badge-arbiter' });
-    } else {
-      nodes.push({ role: 'SECONDARY', name: `${s.name}-s${i + 1}`, dot: 'dot-secondary', badge: 'badge-secondary' });
-    }
+    nodes.push({ role: 'SECONDARY', name: `${s.name}-s${i + 1}`, dot: 'dot-secondary', badge: 'badge-secondary' });
   }
   return nodes.map(node => `
     <div class="shard-node">

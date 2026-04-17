@@ -546,7 +546,6 @@ input { font-family: inherit; font-size: inherit; }
 .badge-config { background: rgba(245,158,11,0.15); color: #F59E0B; }
 .badge-primary { background: rgba(0,237,100,0.15); color: var(--mongo-green); }
 .badge-secondary { background: rgba(139,148,158,0.15); color: var(--text-secondary); }
-.badge-arbiter { background: rgba(239,68,68,0.15); color: #EF4444; }
 
 .node-name {
   font-size: 12px;
@@ -654,7 +653,6 @@ input { font-family: inherit; font-size: inherit; }
 }
 .dot-primary { background: var(--mongo-green); }
 .dot-secondary { background: var(--text-muted); }
-.dot-arbiter { background: #EF4444; }
 .shard-node-name { color: var(--text-secondary); flex: 1; }
 .shard-node-role { font-size: 10px; color: var(--text-muted); }
 
