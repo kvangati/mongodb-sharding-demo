@@ -266,9 +266,9 @@
               </header>
               <ul class="lim-list">
                 <li><strong>Shard key must carry the zone discriminator.</strong> The tagging field (e.g. <code>country</code>, <code>region</code>) has to be a <em>prefix</em> of the shard key — retrofitting zones onto an existing shard key often requires resharding.</li>
-                <li><strong>Enforcement is eventual, not immediate.</strong> Documents written with out-of-zone keys are accepted first and migrated later — residency compliance has a window of violation until the balancer catches up.</li>
+                <li><strong>Placement depends on tags and balancer state.</strong> Incorrect or incomplete zone ranges/tags can cause data to land outside intended locality until migrations complete.</li>
                 <li><strong>Cross-zone balancer churn.</strong> Adding, removing, or retagging a zone can trigger TB-scale chunk migrations that saturate the inter-region link and backpressure application writes.</li>
-                <li><strong>Ambiguous overlaps.</strong> A shard assigned to multiple zones, or zones with overlapping ranges, produces non-deterministic placement decisions that are hard to debug.</li>
+                <li><strong>Zone-rule complexity.</strong> Misconfigured ranges or tag assignments can lead to unexpected placement and migration behavior that is difficult to debug in production.</li>
                 <li><strong>Cross-zone queries scatter-gather.</strong> Queries without the zone prefix in the predicate fan out to every shard, erasing the locality benefit.</li>
                 <li><strong>Capacity planning is manual.</strong> Hot zones (e.g. NA-East during business hours) are not auto-scaled — the operator must provision shards per zone by forecast.</li>
                 <li><strong>Tiered-storage zones still manual.</strong> Using zones for hot/cold tiering (SSD vs HDD shards) requires custom TTL-driven field updates to migrate aging data.</li>
@@ -281,23 +281,23 @@
           <h4 class="lim-group-title">Deployment Model Challenges</h4>
           <div class="lim-deploy-grid">
 
-            <!-- Atlas Automatic -->
+            <!-- Atlas Global Clusters -->
             <section class="lim-card lim-card-deploy">
               <header class="lim-card-head lim-card-head-deploy">
                 <div class="lim-badge lim-badge-atlas">Atlas</div>
                 <div>
-                  <h5>Atlas Automatic Sharding</h5>
-                  <span class="lim-card-sub">Global Clusters &amp; managed zone sharding</span>
+                  <h5>Atlas Global Clusters (Managed Zone Sharding)</h5>
+                  <span class="lim-card-sub">Managed zone sharding for geo-locality and residency</span>
                 </div>
               </header>
               <ul class="lim-list">
-                <li><strong>Tier floor.</strong> Sharded clusters require M30+ (M10/M20 are replica-set only), establishing a meaningful cost floor before you can shard at all.</li>
-                <li><strong>Compound shard key is mandatory.</strong> Global Clusters require a composite key of <code>{location, customKey}</code> — application code must supply the location field on every write.</li>
-                <li><strong>Shard key &amp; zone mapping are semi-immutable.</strong> Although <code>reshardCollection</code> is available, changing the Global Cluster zone topology often requires a new cluster and an app-coordinated migration.</li>
-                <li><strong>"Automatic" = balancer, not key selection.</strong> Atlas does not choose your shard key or detect hotspots — a poor key still produces a pathological cluster.</li>
+                <li><strong>Dedicated-tier requirement.</strong> Sharded deployments are available on Atlas dedicated tiers (for example M30+), which creates a non-trivial cost floor.</li>
+                <li><strong>Zone-aware key design is still required.</strong> The shard key must support zone routing, and application writes must consistently include the routing/location fields used by your zone strategy.</li>
+                <li><strong>Topology changes are supported but operationally heavy.</strong> <code>reshardCollection</code> and zone changes can be online, but still require planning, migration time, and temporary capacity headroom.</li>
+                <li><strong>"Managed" does not imply automatic shard-key or shard-count decisions.</strong> Atlas manages infrastructure and balancing, but key design and scaling strategy remain workload-specific operator decisions.</li>
                 <li><strong>Limited balancer-window control.</strong> You can configure balancing windows but not per-collection priorities or migration parallelism like self-managed.</li>
                 <li><strong>Backups are slower &amp; larger.</strong> Sharded cluster snapshots coordinate across shards; restores are non-trivial and take markedly longer than replica-set restores.</li>
-                <li><strong>Feature restrictions.</strong> Queryable Encryption, Atlas Search, and Vector Search each have documented constraints on sharded collections (shard-key requirements, consistency, index placement).</li>
+                <li><strong>Feature-specific constraints.</strong> Queryable Encryption, Atlas Search, and Vector Search can have additional constraints on sharded collections (for example shard-key requirements or index-placement considerations).</li>
                 <li><strong>Cross-region egress cost.</strong> Multi-region Global Clusters incur per-GB cloud egress on every migration and cross-zone query — easy to under-estimate.</li>
               </ul>
             </section>
@@ -307,19 +307,19 @@
               <header class="lim-card-head lim-card-head-deploy">
                 <div class="lim-badge lim-badge-self">Atlas</div>
                 <div>
-                  <h5>Atlas Self-Managed Sharding</h5>
-                  <span class="lim-card-sub">Atlas dedicated clusters, operator-driven shard design</span>
+                  <h5>Atlas Dedicated Sharded Clusters</h5>
+                  <span class="lim-card-sub">Atlas-hosted infrastructure, operator-owned shard strategy</span>
                 </div>
               </header>
               <ul class="lim-list">
                 <li><strong>Shard-key ownership is yours.</strong> Atlas hosts the infrastructure, but poor key choice (low cardinality, monotonic, or frequency-skewed) still produces jumbo chunks and hotspots.</li>
-                <li><strong>Resharding is online but costly.</strong> <code>reshardCollection</code> peaks at roughly 2× collection storage and doubles IOPS for the duration — capacity headroom must be planned.</li>
+                <li><strong>Resharding is online but costly.</strong> <code>reshardCollection</code> can temporarily require substantial extra storage and I/O, so capacity headroom must be planned.</li>
                 <li><strong>Rolling shard replacements.</strong> Vertically scaling a shard tier is a rolling replica-set replacement — each shard takes minutes-to-hours depending on data size.</li>
-                <li><strong>Config metadata bloat.</strong> <code>config.changelog</code> and <code>config.chunks</code> grow without TTL; long-lived clusters accumulate millions of chunk rows that slow balancer decisions.</li>
-                <li><strong>Mongos connection limits.</strong> Each mongos caps at ~64k connections (often less in practice); high-concurrency apps must deploy multiple routers and manage connection-pool fan-out.</li>
-                <li><strong>Cross-shard transactions.</strong> Multi-shard <code>startTransaction</code> involves two-phase commit — latency rises sharply and abort rates climb under contention (lock timeouts default to 5 s).</li>
+                <li><strong>Config metadata growth.</strong> Long-lived clusters can accumulate large chunk/changelog metadata, which can increase balancing and metadata-management overhead.</li>
+                <li><strong>Mongos connection scaling.</strong> High-concurrency applications often need multiple routers and careful pool tuning, because practical per-router connection limits are finite.</li>
+                <li><strong>Cross-shard transactions.</strong> Multi-shard <code>startTransaction</code> uses two-phase commit — latency rises and abort rates can increase under contention.</li>
                 <li><strong>Change-stream ordering caveats.</strong> Cluster-wide change streams do not guarantee total order across shards; consumers must tolerate per-shard causal ordering.</li>
-                <li><strong>$lookup / $graphLookup restrictions.</strong> Joining against a sharded foreign collection has specific rules (must be on mongos, uses merge-on-router) that constrain aggregation pipelines.</li>
+                <li><strong>Cross-shard joins can be expensive.</strong> <code>$lookup</code>/<code>$graphLookup</code> across shards can trigger router merge work and additional network hops, impacting aggregation latency.</li>
                 <li><strong>16 MB BSON limit unchanged.</strong> Sharding increases aggregate capacity but does not raise the per-document limit — large blobs still require GridFS or external object storage.</li>
               </ul>
             </section>
