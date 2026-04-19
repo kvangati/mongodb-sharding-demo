@@ -158,6 +158,7 @@
         <button class="view-tab" data-tab="distribution" data-tooltip="<strong>Data Distribution</strong><br>Bar charts showing how documents are spread across shards. Hashed sharding should produce near-equal bars; range sharding may skew based on key values.">Data Distribution</button>
         <button class="view-tab" data-tab="routing" data-tooltip="<strong>Query Routing</strong><br>Run example queries and watch mongos decide which shards to contact. <em>Targeted</em> queries hit 1 shard; <em>scatter-gather</em> queries fan out to all shards.">Query Routing</button>
         <button class="view-tab" data-tab="balancer" data-tooltip="<strong>Load Balancer</strong><br>The balancer is a background thread on the config server primary that monitors data size per shard and migrates chunks to equalise the distribution.">Load Balancer</button>
+        <button class="view-tab" data-tab="automerger" data-tooltip="<strong>AutoMerger</strong><br>Demonstrates how MongoDB merges adjacent chunks on the <em>same shard</em> when merge preconditions are met, reducing chunk-map metadata without moving data between shards.">AutoMerger</button>
         <button class="view-tab" data-tab="limitations" data-tooltip="<strong>Limitations & Challenges</strong><br>In-depth technical limitations of each sharding strategy (range, hash, zone) and operational challenges across Atlas auto-sharding, Atlas self-managed, and Enterprise Advanced deployments.">Limitations</button>
       </div>
 
@@ -188,6 +189,11 @@
       <!-- Load Balancer View -->
       <div class="tab-content" id="tab-balancer">
         <div class="balancer-panel" id="balancer-panel"></div>
+      </div>
+
+      <!-- AutoMerger View -->
+      <div class="tab-content" id="tab-automerger">
+        <div class="automerger-panel" id="automerger-panel"></div>
       </div>
 
       <!-- Limitations View -->
