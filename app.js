@@ -532,7 +532,7 @@ function generateDocument() {
       ...base,
       order_id: 100000 + docSeq,
       customer_id: `C${pad(Math.floor(Math.random() * 1000000), 6)}`,
-      order_date: new Date(ts - Math.random() * 3e10).toISOString().split('T')[0],
+      order_date: new Date(new Date('2020-01-01').getTime() + Math.random() * (new Date('2025-01-01').getTime() - new Date('2020-01-01').getTime())).toISOString().split('T')[0],
       total: +(Math.random() * 2000 + 10).toFixed(2),
       status: STATUSES[Math.floor(Math.random() * STATUSES.length)],
       region,
@@ -698,9 +698,11 @@ function getRangeInfo(shardIdx) {
     }
     if (key === 'order_date') {
       const span = 5;
-      const yearStart = 2020 + Math.floor((shardIdx / n) * span);
-      const yearEnd = 2020 + Math.floor(((shardIdx + 1) / n) * span);
-      return `order_date: ${yearStart} → ${shardIdx === n - 1 ? 'MaxKey' : yearEnd}`;
+      // Boundary year between shard i and i+1: first year where floor((year-2020)/span * n) = i+1
+      // = ceil(2020 + (i+1)*span/n)
+      const yearStart = shardIdx === 0 ? 2020 : 2020 + Math.ceil(shardIdx * span / n);
+      const yearEnd = shardIdx === n - 1 ? 'MaxKey' : (2020 + Math.ceil((shardIdx + 1) * span / n));
+      return `order_date: ${yearStart} → ${yearEnd}`;
     }
     if (key === 'order_id') {
       return shardIdx === n - 1 ? `order_id: ← HOTSPOT (all inserts here!)` : `order_id: no data (underutilized)`;
@@ -2241,7 +2243,7 @@ function initEventListeners() {
 
   // Speed slider
   const slider = document.getElementById('speed-slider');
-  const speedLabels = ['', 'Slow', 'Normal', 'Normal', 'Fast', 'Instant'];
+  const speedLabels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
   slider.addEventListener('input', () => {
     state.animationSpeed = parseInt(slider.value);
     document.getElementById('speed-label').textContent = speedLabels[state.animationSpeed] || 'Normal';
@@ -2483,7 +2485,7 @@ function renderBalancer() {
   if (!bSt.shards.length) bInitState(bSt.shardCount, bSt.chunksPerShard);
 
   const bal  = bGetBalance();
-  const spLabels = ['', 'Slow', 'Normal', 'Normal', 'Fast', 'Instant'];
+  const spLabels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
 
   panel.innerHTML = `
     <!-- How it works banner -->
@@ -2493,7 +2495,7 @@ function renderBalancer() {
       <span class="tip" data-tooltip="<strong>Config Server Primary</strong><br>The primary node of the Config Server Replica Set (CSRS). It stores the cluster's metadata: the chunk map, shard registry, and zone assignments. The balancer runs exclusively on this node.">config server primary</span>
       that monitors <strong>total data size per shard</strong> (MongoDB 6.0+). When the difference between the
       most-loaded and least-loaded shard exceeds the
-      <span class="tip" data-tooltip="<strong>Migration Threshold</strong><br>The minimum MB difference between the largest and smallest shard before the balancer triggers chunk migrations. MongoDB's default is 500 MB. Lower = more aggressive balancing; higher = fewer migrations but more skew.">migration threshold</span>,
+      <span class="tip" data-tooltip="<strong>Migration Threshold</strong><br>The minimum MB difference between the largest and smallest shard before the balancer triggers chunk migrations. MongoDB's default is 384 MB (3 × 128 MB chunkSize). Lower = more aggressive balancing; higher = fewer migrations but more skew.">migration threshold</span>,
       it moves chunks to even out the distribution. It picks the
       <span class="tip" data-tooltip="<strong>Best-fit Chunk Selection</strong><br>The balancer picks the chunk whose sizeMB is closest to diff÷2, so after the migration the gap between shards is minimised. This avoids overshoot (where the destination shard then becomes the largest).">best-fit non-jumbo chunk</span>
       and streams it to the least-loaded shard using the
@@ -2600,13 +2602,14 @@ function renderBalancer() {
           has grown beyond <code>chunkSize</code> (default 128 MB) and
           <em>cannot be split</em> — because every document inside shares the same
           <span class="tip" data-tooltip="<strong>Shard Key Value</strong><br>The specific value of the field used to partition data. If many documents share an identical shard key value (e.g. status='pending'), they all land in the same chunk, which grows without bound.">shard key value</span>.
-          MongoDB marks it with the <code>jumbo</code> flag and the balancer skips it, so it
-          accumulates indefinitely on one shard.</p>
+          MongoDB marks it with the <code>jumbo</code> flag and the balancer skips it by default, so it
+          accumulates on one shard.</p>
           <div class="jumbo-facts">
             <div class="jumbo-fact jumbo-fact-red">
-              <strong>Problem:</strong> The balancer cannot migrate a jumbo chunk.
-              It marks it <code>jumbo: true</code> in the config server and routes all
+              <strong>Problem:</strong> The balancer skips jumbo chunks by default.
+              It marks the chunk <code>jumbo: true</code> in the config server and routes all
               subsequent writes for that key to the same shard, compounding the imbalance.
+              (You can override with <code>attemptToBalanceJumboChunks</code> or <code>forceJumbo</code>.)
             </div>
             <div class="jumbo-fact jumbo-fact-yellow">
               <strong>Cause:</strong> High write rate to a
@@ -2848,7 +2851,7 @@ function bShowJumboModal() {
         <div class="jumbo-modal-section">
           <h4>Risks of jumbo chunks</h4>
           <ul class="jumbo-modal-list">
-            <li><span class="risk-badge risk-high">High</span><strong>Balancer cannot migrate them.</strong> The balancer permanently skips chunks flagged <code>jumbo: true</code>, so data skew on the hot shard is never resolved automatically.</li>
+            <li><span class="risk-badge risk-high">High</span><strong>Balancer skips them by default.</strong> Chunks flagged <code>jumbo: true</code> are skipped during normal balancing. Data skew on the hot shard is not resolved automatically unless <code>attemptToBalanceJumboChunks</code> is enabled or <code>forceJumbo</code> is used.</li>
             <li><span class="risk-badge risk-high">High</span><strong>Persistent hot shard.</strong> Writes continue routing to the same shard indefinitely, compounding CPU, memory, and I/O pressure on that node.</li>
             <li><span class="risk-badge risk-med">Medium</span><strong>Replication lag.</strong> A single overloaded primary shard can slow oplog application on secondaries, increasing replication lag cluster-wide.</li>
             <li><span class="risk-badge risk-med">Medium</span><strong>Difficult to resolve at scale.</strong> Clearing the jumbo flag (<code>sh.clearJumboFlag()</code>) only works once the underlying data distribution or shard key is improved.</li>
@@ -3107,7 +3110,7 @@ function initBalancerListeners() {
   // Speed slider
   document.getElementById('bal-speed')?.addEventListener('input', e => {
     bSt.speed = parseInt(e.target.value);
-    const labels = ['', 'Slow', 'Normal', 'Normal', 'Fast', 'Instant'];
+    const labels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
     const lbl = document.getElementById('bal-speed-label');
     if (lbl) lbl.textContent = labels[bSt.speed];
   });
@@ -3363,7 +3366,7 @@ function renderAutoMerger() {
   const stats = aStats(candidates);
   const next = aPickNextMerge(candidates);
   const bal = aGetBalance();
-  const speedLabels = ['', 'Slow', 'Normal', 'Normal', 'Fast', 'Instant'];
+  const speedLabels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
 
   panel.innerHTML = `
     <div class="am-intro">
@@ -3767,7 +3770,7 @@ function initAutoMergerListeners() {
 
   document.getElementById('am-speed')?.addEventListener('input', e => {
     aSt.speed = parseInt(e.target.value, 10);
-    const labels = ['', 'Slow', 'Normal', 'Normal', 'Fast', 'Instant'];
+    const labels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
     const lbl = document.getElementById('am-speed-label');
     if (lbl) lbl.textContent = labels[aSt.speed] || 'Normal';
   });

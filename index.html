@@ -252,7 +252,7 @@
                 <li><strong>Bulk-load migration storms.</strong> Loading pre-sorted data creates new chunks on one shard faster than the balancer can migrate them, so imports complete unbalanced and then thrash for hours.</li>
                 <li><strong>Cardinality &amp; frequency pitfalls.</strong> Low-cardinality keys (e.g. <code>status</code>, <code>country</code>) cap the number of possible chunks; high-frequency values create unsplittable jumbo chunks.</li>
                 <li><strong>Full-range scatter-gather.</strong> Range predicates that span most of the key domain still broadcast to every shard — the "range query efficiency" benefit only applies to narrow windows.</li>
-                <li><strong>Expensive shard-key changes.</strong> <code>reshardCollection</code> requires ~1.2× collection size in free disk, re-writes every document, and pauses writes briefly at cutover.</li>
+                <li><strong>Expensive shard-key changes.</strong> <code>reshardCollection</code> requires approximately <code>(collection + index size) × 2 ÷ shard count</code> of free disk per shard, re-writes every document, and pauses writes briefly at cutover.</li>
               </ul>
             </section>
 
