@@ -2709,23 +2709,58 @@ function renderBalancer() {
           </div>
         </div>
 
-        <div class="bal-ctrl-section">
+        <div class="bal-ctrl-section bal-actions">
           <div class="bal-ctrl-title">Balancer Actions</div>
-          <div class="bal-threshold-info">
-            <div class="bal-threshold-row"><span class="tip" data-tooltip="<strong>Threshold</strong><br>Balancer fires only when the data-size gap between the most-loaded and least-loaded shard exceeds this value. Currently set to ${bal.threshold} MB.">Threshold</span><span class="bal-threshold-val">${bal.threshold} MB</span></div>
-            <div class="bal-threshold-row"><span class="tip" data-tooltip="<strong>Current Diff</strong><br>Live data-size difference (MB) between the most-loaded and least-loaded shard. When this exceeds the threshold the balancer starts migrating chunks.">Current diff</span><span class="bal-threshold-val ${bal.diff>bal.threshold?'over-threshold':''}">${bal.diff} MB</span></div>
-            <div class="bal-threshold-row"><span class="tip" data-tooltip="<strong>Migrations</strong><br>Total chunk migrations completed in this session. Each migration moves one chunk from the most-loaded shard to the least-loaded shard.">Migrations</span><span class="bal-threshold-val" id="bal-migration-count">${bSt.migrations}</span></div>
+
+          <!-- Live stats -->
+          <div class="bal-stat-grid">
+            <div class="bal-stat tip" data-tooltip="<strong>Threshold</strong><br>Balancer fires only when the data-size gap between the most-loaded and least-loaded shard exceeds this value. Currently set to ${bal.threshold} MB.">
+              <span class="bal-stat-label">Threshold</span>
+              <span class="bal-stat-val">${bal.threshold}<small>MB</small></span>
+            </div>
+            <div class="bal-stat tip ${bal.diff>bal.threshold?'bal-stat-alert':''}" data-tooltip="<strong>Current Diff</strong><br>Live data-size difference (MB) between the most-loaded and least-loaded shard. When this exceeds the threshold the balancer starts migrating chunks.">
+              <span class="bal-stat-label">Current diff</span>
+              <span class="bal-stat-val">${bal.diff}<small>MB</small></span>
+            </div>
+            <div class="bal-stat tip" data-tooltip="<strong>Migrations</strong><br>Total chunk migrations completed in this session. Each migration moves one chunk from the most-loaded shard to the least-loaded shard.">
+              <span class="bal-stat-label">Migrations</span>
+              <span class="bal-stat-val" id="bal-migration-count">${bSt.migrations}</span>
+            </div>
           </div>
-          <button class="bal-btn bal-btn-imbalance" id="bal-imbalance" data-tooltip="<strong>Trigger Imbalance</strong><br>Adds a batch of chunks to shard 0, pushing its data size well above the threshold. The balancer will then kick in and start migrating chunks.">⚡ Trigger Imbalance</button>
-          <button class="bal-btn bal-btn-addshard" id="bal-add-shard" ${bSt.shardCount>=5||bSt.running?'disabled':''} data-tooltip="<strong>Add Shard Scenario</strong><br>Adds a new empty shard to the cluster. The balancer will detect the severe imbalance (new shard has 0 MB vs existing shards) and begin draining chunks from the most-loaded shards into the new one — exactly what happens in a real MongoDB scale-out.">＋ Add Shard</button>
-          <button class="bal-btn ${bSt.running?'bal-btn-stop':'bal-btn-run'}" id="bal-run-toggle" data-tooltip="<strong>Start / Stop Balancer</strong><br>Runs the balancer loop automatically, migrating one chunk at a time with a short pause between rounds until the cluster is balanced.">
-            ${bSt.running ? '⏹ Stop Balancer' : '▶ Start Balancer'}
-          </button>
-          <button class="bal-btn bal-btn-step" id="bal-step" ${bSt.running||bSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single balancer round: evaluates the current imbalance, selects the best-fit chunk, and migrates it. Useful for stepping through the algorithm manually.">⏭ Step Once</button>
-          <button class="bal-btn bal-btn-jumbo" id="bal-jumbo-btn" data-tooltip="<strong>Create Jumbo Scenario</strong><br>Injects jumbo chunks on shard 0. Run the balancer to see it stall when only jumbo chunks remain.">⚠ Create Jumbo Scenario</button>
-          <button class="bal-btn bal-btn-refine" id="bal-refine-key" data-tooltip="<strong>Simulate refineShardKey</strong><br>Simulates sh.refineCollectionShardKey() — splits jumbo chunks into normal movable ones so the balancer can resume redistribution.">🛠 Simulate refineShardKey</button>
-          <button class="bal-btn bal-btn-jumbo" id="bal-toggle-jumbo" data-tooltip="<strong>Show / Hide Jumbo Explainer</strong><br>Toggles the jumbo-chunk concept and walkthrough section below.">${bSt.showJumbo ? '🙈 Hide Jumbo Explainer' : '📖 Show Jumbo Explainer'}</button>
-          <button class="bal-btn bal-btn-reset" id="bal-reset" data-tooltip="<strong>Reset Cluster</strong><br>Destroys the current state and rebuilds the cluster with the selected shard count and chunks-per-shard, all chunks with random sizes between 20–100 MB.">↺ Reset Cluster</button>
+
+          <!-- Primary run controls -->
+          <div class="bal-btn-primary-row">
+            <button class="bal-btn bal-btn-hero ${bSt.running?'bal-btn-stop':'bal-btn-run'}" id="bal-run-toggle" data-tooltip="<strong>Start / Stop Balancer</strong><br>Runs the balancer loop automatically, migrating one chunk at a time with a short pause between rounds until the cluster is balanced.">
+              ${bSt.running ? '<span class="bal-btn-ico">⏹</span> Stop Balancer' : '<span class="bal-btn-ico">▶</span> Start Balancer'}
+            </button>
+            <button class="bal-btn bal-btn-step bal-btn-compact" id="bal-step" ${bSt.running||bSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single balancer round: evaluates the current imbalance, selects the best-fit chunk, and migrates it. Useful for stepping through the algorithm manually.">
+              <span class="bal-btn-ico">⏭</span> Step
+            </button>
+          </div>
+
+          <!-- Scenario grid -->
+          <div class="bal-btn-group-label">Scenarios</div>
+          <div class="bal-btn-grid">
+            <button class="bal-btn bal-btn-imbalance" id="bal-imbalance" data-tooltip="<strong>Trigger Imbalance</strong><br>Adds a batch of chunks to shard 0, pushing its data size well above the threshold. The balancer will then kick in and start migrating chunks.">
+              <span class="bal-btn-ico">⚡</span> Imbalance
+            </button>
+            <button class="bal-btn bal-btn-addshard" id="bal-add-shard" ${bSt.shardCount>=5||bSt.running?'disabled':''} data-tooltip="<strong>Add Shard Scenario</strong><br>Adds a new empty shard to the cluster. The balancer will detect the severe imbalance (new shard has 0 MB vs existing shards) and begin draining chunks from the most-loaded shards into the new one — exactly what happens in a real MongoDB scale-out.">
+              <span class="bal-btn-ico">＋</span> Add Shard
+            </button>
+            <button class="bal-btn bal-btn-jumbo" id="bal-jumbo-btn" data-tooltip="<strong>Create Jumbo Scenario</strong><br>Injects jumbo chunks on shard 0. Run the balancer to see it stall when only jumbo chunks remain.">
+              <span class="bal-btn-ico">⚠</span> Jumbo
+            </button>
+            <button class="bal-btn bal-btn-refine" id="bal-refine-key" data-tooltip="<strong>Simulate refineShardKey</strong><br>Simulates sh.refineCollectionShardKey() — splits jumbo chunks into normal movable ones so the balancer can resume redistribution.">
+              <span class="bal-btn-ico">🛠</span> Refine Key
+            </button>
+          </div>
+
+          <!-- Utility row -->
+          <div class="bal-btn-util-row bal-btn-util-row-single">
+            <button class="bal-btn bal-btn-reset" id="bal-reset" data-tooltip="<strong>Reset Cluster</strong><br>Destroys the current state and rebuilds the cluster with the selected shard count and chunks-per-shard, all chunks with random sizes between 20–100 MB.">
+              ↺ Reset Cluster
+            </button>
+          </div>
         </div>
 
         <div class="bal-ctrl-section">
@@ -2853,15 +2888,22 @@ function bRefreshViz() {
   const mc = document.getElementById('bal-migration-count');
   if (mc) mc.textContent = bSt.migrations;
 
-  // Threshold diff
-  const diffEl = document.querySelector('.bal-threshold-row .bal-threshold-val.over-threshold, .bal-threshold-row .bal-threshold-val:nth-child(2)');
-  // Re-render threshold info section instead
-  const thInfo = document.querySelector('.bal-threshold-info');
-  if (thInfo) {
-    thInfo.innerHTML = `
-      <div class="bal-threshold-row"><span>Threshold</span><span class="bal-threshold-val">${bal.threshold} MB</span></div>
-      <div class="bal-threshold-row"><span>Current diff</span><span class="bal-threshold-val ${bal.diff>bal.threshold?'over-threshold':''}">${bal.diff} MB</span></div>
-      <div class="bal-threshold-row"><span>Migrations</span><span class="bal-threshold-val" id="bal-migration-count">${bSt.migrations}</span></div>`;
+  // Refresh live stat grid (threshold / diff / migrations)
+  const statGrid = document.querySelector('.bal-actions .bal-stat-grid');
+  if (statGrid) {
+    statGrid.innerHTML = `
+      <div class="bal-stat tip" data-tooltip="<strong>Threshold</strong><br>Balancer fires only when the data-size gap between the most-loaded and least-loaded shard exceeds this value. Currently set to ${bal.threshold} MB.">
+        <span class="bal-stat-label">Threshold</span>
+        <span class="bal-stat-val">${bal.threshold}<small>MB</small></span>
+      </div>
+      <div class="bal-stat tip ${bal.diff>bal.threshold?'bal-stat-alert':''}" data-tooltip="<strong>Current Diff</strong><br>Live data-size difference (MB) between the most-loaded and least-loaded shard. When this exceeds the threshold the balancer starts migrating chunks.">
+        <span class="bal-stat-label">Current diff</span>
+        <span class="bal-stat-val">${bal.diff}<small>MB</small></span>
+      </div>
+      <div class="bal-stat tip" data-tooltip="<strong>Migrations</strong><br>Total chunk migrations completed in this session. Each migration moves one chunk from the most-loaded shard to the least-loaded shard.">
+        <span class="bal-stat-label">Migrations</span>
+        <span class="bal-stat-val" id="bal-migration-count">${bSt.migrations}</span>
+      </div>`;
   }
 }
 
@@ -2956,8 +2998,10 @@ async function bDoStep() {
 function bUpdateRunBtn() {
   const btn = document.getElementById('bal-run-toggle');
   if (!btn) return;
-  btn.className = `bal-btn ${bSt.running ? 'bal-btn-stop' : 'bal-btn-run'}`;
-  btn.innerHTML = bSt.running ? '⏹ Stop Balancer' : '▶ Start Balancer';
+  btn.className = `bal-btn bal-btn-hero ${bSt.running ? 'bal-btn-stop' : 'bal-btn-run'}`;
+  btn.innerHTML = bSt.running
+    ? '<span class="bal-btn-ico">⏹</span> Stop Balancer'
+    : '<span class="bal-btn-ico">▶</span> Start Balancer';
   const stepBtn = document.getElementById('bal-step');
   if (stepBtn) stepBtn.disabled = bSt.running || bSt.animating;
   const addBtn = document.getElementById('bal-add-shard');
@@ -3072,6 +3116,13 @@ function bCreateJumboScenario() {
   const chunksEl = document.getElementById('bal-chunks-0');
   if (chunksEl) chunksEl.innerHTML = bChunksOf(0).map(bRenderChunkHTML).join('');
   bRefreshViz();
+
+  // Auto-reveal the jumbo explainer section
+  const jumboSection = document.querySelector('.jumbo-section');
+  if (jumboSection) {
+    jumboSection.classList.remove('is-collapsed');
+    setTimeout(() => jumboSection.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150);
+  }
 
   // Show the jumbo demo area with explanation steps
   const demoArea = document.getElementById('jumbo-demo-area');
@@ -3301,13 +3352,6 @@ function initBalancerListeners() {
   // Jumbo scenario — show modal first
   document.getElementById('bal-jumbo-btn')?.addEventListener('click', bShowJumboModal);
   document.getElementById('bal-refine-key')?.addEventListener('click', bSimulateRefineShardKey);
-
-  // Toggle jumbo explainer section visibility
-  document.getElementById('bal-toggle-jumbo')?.addEventListener('click', () => {
-    bSt.showJumbo = !bSt.showJumbo;
-    renderBalancer();
-    bLog('info', bSt.showJumbo ? 'Jumbo section shown.' : 'Jumbo section hidden.');
-  });
 }
 
 // ===================================================================
