@@ -2109,6 +2109,7 @@ const bSt = {
   thresholdMB: 384, // 3 × chunkSize — MongoDB's data-size balancing threshold
   running: false,
   animating: false,
+  showJumbo: false,
   migrations: 0,
   log: [],
   speed: 2,
@@ -2327,6 +2328,9 @@ function renderBalancer() {
             ${bSt.running ? '⏹ Stop Balancer' : '▶ Start Balancer'}
           </button>
           <button class="bal-btn bal-btn-step" id="bal-step" ${bSt.running||bSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single balancer round: evaluates the current imbalance, selects the best-fit chunk, and migrates it. Useful for stepping through the algorithm manually.">⏭ Step Once</button>
+          <button class="bal-btn bal-btn-jumbo" id="bal-jumbo-btn" data-tooltip="<strong>Create Jumbo Scenario</strong><br>Injects jumbo chunks on shard 0. Run the balancer to see it stall when only jumbo chunks remain.">⚠ Create Jumbo Scenario</button>
+          <button class="bal-btn bal-btn-refine" id="bal-refine-key" data-tooltip="<strong>Simulate refineShardKey</strong><br>Simulates sh.refineCollectionShardKey() — splits jumbo chunks into normal movable ones so the balancer can resume redistribution.">🛠 Simulate refineShardKey</button>
+          <button class="bal-btn bal-btn-jumbo" id="bal-toggle-jumbo" data-tooltip="<strong>Show / Hide Jumbo Explainer</strong><br>Toggles the jumbo-chunk concept and walkthrough section below.">${bSt.showJumbo ? '🙈 Hide Jumbo Explainer' : '📖 Show Jumbo Explainer'}</button>
           <button class="bal-btn bal-btn-reset" id="bal-reset" data-tooltip="<strong>Reset Cluster</strong><br>Destroys the current state and rebuilds the cluster with the selected shard count and chunks-per-shard, all chunks with random sizes between 20–100 MB.">↺ Reset Cluster</button>
         </div>
 
@@ -2363,12 +2367,9 @@ function renderBalancer() {
     </div>
 
     <!-- Jumbo chunks section -->
-    <div class="jumbo-section">
+    <div class="jumbo-section ${bSt.showJumbo ? '' : 'is-collapsed'}">
       <div class="jumbo-section-header">
         <h3>Jumbo Chunks</h3>
-        <button class="bal-btn bal-btn-jumbo" id="bal-jumbo-btn" style="width:auto;margin:0">
-          ⚠ Create Jumbo Scenario
-        </button>
       </div>
       <div class="jumbo-content">
         <div class="jumbo-explanation">
@@ -2392,6 +2393,9 @@ function renderBalancer() {
             </div>
             <div class="jumbo-fact jumbo-fact-green">
               <strong>Fix:</strong> Choose a higher-cardinality shard key (or compound key).
+              In MongoDB, you can refine an existing key pattern with
+              <span class="tip" data-tooltip="<strong>sh.refineCollectionShardKey()</strong><br>Refines a collection's shard key by adding one or more suffix fields to increase cardinality and improve distribution/splitability without fully resharding."><code>sh.refineCollectionShardKey()</code></span>
+              to make jumbo ranges splittable.
               After reducing the data, use
               <span class="tip" data-tooltip="<strong>sh.clearJumboFlag()</strong><br>Removes the <code>jumbo</code> flag from a chunk in the config server. After clearing, the balancer can attempt to split the chunk (if it can be split) and then migrate it. Requires the chunk's data to have been reduced first, otherwise it immediately becomes jumbo again."><code>sh.clearJumboFlag()</code></span> or
               <code>db.adminCommand({ clearJumboFlag: "db.coll", ... })</code> to unlock the chunk.
@@ -2593,8 +2597,64 @@ function bTriggerImbalance() {
 
 // ----- jumbo chunk scenario -----
 
+function bShowJumboModal() {
+  const existing = document.getElementById('jumbo-modal-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'jumbo-modal-overlay';
+  overlay.className = 'jumbo-modal-overlay';
+  overlay.innerHTML = `
+    <div class="jumbo-modal">
+      <div class="jumbo-modal-header">
+        <span class="jumbo-modal-icon">⚠</span>
+        <h3>What is a Jumbo Chunk?</h3>
+        <button class="jumbo-modal-close" id="jumbo-modal-close">×</button>
+      </div>
+      <div class="jumbo-modal-body">
+        <div class="jumbo-modal-section">
+          <h4>How jumbo chunks are created</h4>
+          <p>A chunk becomes <strong>jumbo</strong> when it grows beyond the configured <code>chunkSize</code> (default 128 MB) and MongoDB cannot split it. This happens when every document in the chunk shares the <strong>same shard key value</strong> — for example, all documents with <code>status: &quot;pending&quot;</code> must live in the same chunk, and that chunk cannot be halved because there is no boundary to split on.</p>
+          <div class="jumbo-modal-code">
+            // Example: low-cardinality key causes jumbo chunks<br>
+            sh.shardCollection(&quot;mydb.orders&quot;, { status: 1 })<br><br>
+            // All &quot;pending&quot; orders accumulate in one chunk<br>
+            // until it exceeds chunkSize and gains the jumbo flag
+          </div>
+        </div>
+        <div class="jumbo-modal-section">
+          <h4>Risks of jumbo chunks</h4>
+          <ul class="jumbo-modal-list">
+            <li><span class="risk-badge risk-high">High</span><strong>Balancer cannot migrate them.</strong> The balancer permanently skips chunks flagged <code>jumbo: true</code>, so data skew on the hot shard is never resolved automatically.</li>
+            <li><span class="risk-badge risk-high">High</span><strong>Persistent hot shard.</strong> Writes continue routing to the same shard indefinitely, compounding CPU, memory, and I/O pressure on that node.</li>
+            <li><span class="risk-badge risk-med">Medium</span><strong>Replication lag.</strong> A single overloaded primary shard can slow oplog application on secondaries, increasing replication lag cluster-wide.</li>
+            <li><span class="risk-badge risk-med">Medium</span><strong>Difficult to resolve at scale.</strong> Clearing the jumbo flag (<code>sh.clearJumboFlag()</code>) only works once the underlying data distribution or shard key is improved.</li>
+            <li><span class="risk-badge risk-low">Low</span><strong>Metadata bloat.</strong> Jumbo chunks are tracked indefinitely in the config server, adding noise to chunk-map queries and balancer decisions.</li>
+          </ul>
+        </div>
+        <div class="jumbo-modal-section">
+          <h4>Remediation path</h4>
+          <p>Use <code>sh.refineCollectionShardKey()</code> to add a higher-cardinality suffix field to the shard key, enabling MongoDB to split the previously unsplittable range. Then clear the flag and let the balancer resume.</p>
+        </div>
+      </div>
+      <div class="jumbo-modal-footer">
+        <button class="btn-primary" id="jumbo-modal-confirm">Create Jumbo Scenario →</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  document.getElementById('jumbo-modal-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('jumbo-modal-confirm').addEventListener('click', () => {
+    overlay.remove();
+    bCreateJumboScenario();
+  });
+}
+
 function bCreateJumboScenario() {
   if (bSt.running) return;
+  bSt.showJumbo = true;
 
   // Add 3 jumbo chunks to shard 0 (marking them isJumbo=true)
   const jumboSizes = [156, 182, 143];
@@ -2643,15 +2703,69 @@ function bCreateJumboScenario() {
         <div class="jumbo-step-num">4</div>
         <div class="jumbo-step-text">
           <strong>Resolution in production:</strong>
-          reduce the chunk's document count, then run
-          <code>sh.clearJumboFlag("db.collection", &lt;chunkQuery&gt;)</code> to unset the flag.
-          The balancer can then split and migrate it normally.
+          refine shard key cardinality using
+          <code>sh.refineCollectionShardKey("db.collection", { oldKey: 1, suffix: 1 })</code>,
+          then clear jumbo with
+          <code>sh.clearJumboFlag("db.collection", &lt;chunkQuery&gt;)</code> so split + migration can resume.
         </div>
       </div>
     </div>
     <div class="jumbo-error-msg" id="jumbo-error-msg">
       MongoServerError: Cannot migrate chunk: chunk is marked 'jumbo'. Use clearJumboFlag to clear the flag.
     </div>`;
+}
+
+function bSimulateRefineShardKey() {
+  if (bSt.running || bSt.animating) return;
+
+  const jumbos = bSt.chunks.filter(c => c.isJumbo);
+  if (!jumbos.length) {
+    bLog('info', 'No jumbo chunks found. Create a jumbo scenario first.');
+    return;
+  }
+
+  let splitChunks = 0;
+  let unlockedMB = 0;
+
+  jumbos.forEach(j => {
+    // Remove jumbo chunk
+    bSt.chunks = bSt.chunks.filter(c => c.id !== j.id);
+
+    // Simulate improved cardinality after refineShardKey by splitting range into smaller movable chunks
+    const parts = j.sizeMB > 170 ? 3 : 2;
+    let remaining = j.sizeMB;
+
+    for (let i = 0; i < parts; i++) {
+      let piece;
+      if (i === parts - 1) {
+        piece = remaining;
+      } else {
+        const avg = remaining / (parts - i);
+        piece = +(Math.max(28, Math.min(96, avg + (Math.random() * 10 - 5))).toFixed(1));
+        remaining -= piece;
+      }
+      bSt.chunks.push(bNewChunk(j.shardIdx, piece, false));
+      splitChunks++;
+    }
+
+    unlockedMB += j.sizeMB;
+  });
+
+  bLog('done', `Simulated <code>sh.refineCollectionShardKey()</code>: ${jumbos.length} jumbo chunk(s) were split into ${splitChunks} normal chunks.`);
+  bLog('info', `~${unlockedMB.toFixed(0)} MB is now movable. Start balancer to redistribute from hot shard(s).`);
+
+  const demoArea = document.getElementById('jumbo-demo-area');
+  if (demoArea && demoArea.style.display !== 'none') {
+    const steps = demoArea.querySelectorAll('.jumbo-step');
+    if (steps[3]) steps[3].className = 'jumbo-step step-done';
+    const msg = document.createElement('div');
+    msg.className = 'jumbo-fix-msg';
+    msg.textContent = 'Refine shard key simulation complete. Jumbo flags cleared by resplitting. Run the balancer again to finish redistribution.';
+    demoArea.appendChild(msg);
+  }
+
+  bRefreshViz();
+  renderBalancer();
 }
 
 // ----- add shard scenario -----
@@ -2782,8 +2896,16 @@ function initBalancerListeners() {
     if (el) el.innerHTML = '<div class="bal-log-empty">Log cleared.</div>';
   });
 
-  // Jumbo scenario
-  document.getElementById('bal-jumbo-btn')?.addEventListener('click', bCreateJumboScenario);
+  // Jumbo scenario — show modal first
+  document.getElementById('bal-jumbo-btn')?.addEventListener('click', bShowJumboModal);
+  document.getElementById('bal-refine-key')?.addEventListener('click', bSimulateRefineShardKey);
+
+  // Toggle jumbo explainer section visibility
+  document.getElementById('bal-toggle-jumbo')?.addEventListener('click', () => {
+    bSt.showJumbo = !bSt.showJumbo;
+    renderBalancer();
+    bLog('info', bSt.showJumbo ? 'Jumbo section shown.' : 'Jumbo section hidden.');
+  });
 }
 
 // ===================================================================
@@ -3126,6 +3248,41 @@ function renderAutoMerger() {
     <div class="am-candidates-wrap">
       <div class="am-candidates-head">Adjacency checks this round</div>
       ${aRenderCandidates(candidates)}
+    </div>
+
+    <div class="am-jumbo-section">
+      <div class="am-jumbo-head">Jumbo Chunks — Concept and Operational Impact</div>
+      <div class="am-jumbo-grid">
+        <div class="am-jumbo-card">
+          <h4>What is a jumbo chunk?</h4>
+          <p>
+            A chunk is marked <code>jumbo: true</code> when it grows beyond configured chunk-size limits
+            and cannot be split effectively (commonly because many documents share the same shard-key value).
+          </p>
+        </div>
+        <div class="am-jumbo-card">
+          <h4>Why it matters</h4>
+          <p>
+            The balancer typically skips jumbo chunks, so data skew can persist on a hot shard even when balancing is enabled.
+            AutoMerger does not resolve this condition because the root issue is splitability and key distribution.
+          </p>
+        </div>
+        <div class="am-jumbo-card">
+          <h4>Typical causes</h4>
+          <p>
+            Low-cardinality keys, monotonic write patterns, or extreme frequency skew on specific shard-key values
+            can concentrate growth in one chunk and create recurring jumbo conditions.
+          </p>
+        </div>
+        <div class="am-jumbo-card">
+          <h4>Common remediation path</h4>
+          <p>
+            Improve shard-key design and data distribution first, then clear the jumbo flag when appropriate
+            (for example with <code>clearJumboFlag</code> / <code>sh.clearJumboFlag()</code>) so normal split/migration
+            behavior can resume.
+          </p>
+        </div>
+      </div>
     </div>
 
     <div class="am-log-section">
