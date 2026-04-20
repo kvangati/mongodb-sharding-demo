@@ -101,13 +101,36 @@
               <button class="count-btn" data-count="4">4</button>
             </div>
           </div>
-          <div class="config-row">
-            <span class="config-row-label tip" data-tooltip="<strong>Nodes per Shard</strong><br>Each shard runs as a <strong>replica set</strong>. More nodes = higher read throughput (secondary reads) and fault tolerance. A 3-node set can survive 1 failure; 5-node can survive 2.">Nodes/Shard</span>
+          <div class="config-row" id="nodes-per-shard-row">
+            <span class="config-row-label tip" data-tooltip="<strong>Nodes per Shard</strong><br>Each shard is a replica set. For a realistic sharded-cluster topology, keep at least <strong>3 members</strong> per shard. A 3-node set can survive 1 failure; 5-node can survive 2.">Nodes/Shard</span>
             <div class="btn-group" id="nodes-per-shard-group">
-              <button class="count-btn" data-nodes="1">1</button>
               <button class="count-btn active" data-nodes="3">3</button>
               <button class="count-btn" data-nodes="5">5</button>
+              <button class="count-btn" data-nodes="7">7</button>
             </div>
+          </div>
+          <div class="config-row">
+            <span class="config-row-label tip" data-tooltip="<strong>Asymmetric Sharding</strong><br>Atlas can scale <strong>cluster tier per shard</strong>, support an <strong>analytic tier per shard</strong>, and vary storage / IOPS behavior per shard subject to cloud-specific rules. Auto-scaler stays within the same tier class and a maximum <strong>two-tier gap</strong>.">Asymmetric</span>
+            <button class="toggle-btn asym-toggle" id="asymmetric-toggle" data-tooltip="<strong>Asymmetric Sharding</strong><br>Enable to simulate per-shard compute tier, analytic tier, and provider-specific storage behavior while preserving a valid shard replica-set topology.">Off</button>
+          </div>
+          <div class="config-section hidden-section" id="asymmetric-preset-panel" style="padding:8px 0 0 0;border-top:1px solid var(--border);margin-top:8px;">
+            <div class="config-row-label" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Asymmetric Preset</div>
+            <div class="asym-preset-group" id="asymmetric-preset-group">
+              <button class="asym-preset-btn active" data-preset="tiered" data-tooltip="<strong>Per-Shard Compute</strong><br>Manual per-shard scaling through Admin API / AtlasCLI / Terraform. This demo keeps shards within a two-tier gap: M60 → M50 → M40.">🧩 Compute</button>
+              <button class="asym-preset-btn" data-preset="analytics" data-tooltip="<strong>Analytic Tier</strong><br>Electable and read-only nodes stay on one tier, while analytic nodes on the same shard run on a different tier.">📊 Analytics</button>
+              <button class="asym-preset-btn" data-preset="iops" data-tooltip="<strong>Storage / IOPS</strong><br>Shows AWS Standard vs Provisioned IOPS per shard, Azure Extended Standard IOPS behavior, and GCP storage-tied IOPS behavior.">💾 IOPS</button>
+            </div>
+            <div class="config-row-label" style="font-size:11px;color:var(--text-muted);margin:10px 0 6px;">Cloud Provider</div>
+            <div class="asym-preset-group" id="asymmetric-cloud-group">
+              <button class="asym-preset-btn asym-cloud-btn active" data-cloud="aws">AWS</button>
+              <button class="asym-preset-btn asym-cloud-btn" data-cloud="azure">Azure</button>
+              <button class="asym-preset-btn asym-cloud-btn" data-cloud="gcp">GCP</button>
+            </div>
+            <div class="config-row hidden-section" id="azure-iops-row" style="margin-top:10px;">
+              <span class="config-row-label tip" data-tooltip="<strong>Azure Extended Standard IOPS</strong><br>In Azure regions that support Extended Standard IOPS (Pv2 disks), Standard IOPS can differ per shard. Otherwise Standard IOPS remains tied to storage size.">Azure Pv2 / Extended Standard IOPS</span>
+              <button class="toggle-btn asym-toggle active" id="azure-extended-toggle">On</button>
+            </div>
+            <div style="margin-top:8px;font-size:11px;color:var(--text-muted);line-height:1.45;">Manual per-shard changes are supported through the Admin API, AtlasCLI, and Terraform. Atlas UI does not directly edit cluster tier per shard except indirectly through auto-scaling.</div>
           </div>
           <div class="config-row">
             <span class="config-row-label tip" data-tooltip="<strong>Mongos Routers</strong><br>Stateless query routers that receive application connections, consult the config server's chunk map, and forward operations to the correct shard(s). Scale horizontally — deploy one per app server for best performance.">Mongos Routers</span>

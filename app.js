@@ -18,6 +18,10 @@ const state = {
   routingSpeed: 3,         // 1=slow … 5=fast (query routing flow)
   isInserting: false,
   isBulkLoading: false,
+  asymmetric: false,
+  asymmetricPreset: 'tiered',
+  asymmetricCloud: 'aws',
+  azureExtendedIops: true,
 };
 
 // ===== CONFIGURATION DATA =====
@@ -126,6 +130,84 @@ const ZONES = {
     { id: 'americas2', label: 'Americas DR', region: 'Americas', dc: 'us-west-2', color: '#3B82F6', zoneClass: 'zone-americas' },
   ],
 };
+
+// ===== ASYMMETRIC SHARDING PRESETS =====
+const ASYMMETRIC_PRESETS = {
+  tiered: {
+    label: 'Per-Shard Compute',
+    description: 'Each shard keeps the same replica-set topology, but compute tier changes per shard. This simulates manual per-shard scaling through the Admin API, AtlasCLI, or Terraform while staying within the two-tier limit.',
+    shards: [
+      { tier: 'Hot', clusterClass: 'General', instanceType: 'M60', storageGB: 600, iopsMode: 'provisioned', provisionedIops: 20000, extendedStandardIops: 12000, dotClass: 'dot-hot', badgeClass: 'tier-hot', purpose: 'High-ingest / latency-sensitive range' },
+      { tier: 'Warm', clusterClass: 'General', instanceType: 'M50', storageGB: 500, iopsMode: 'provisioned', provisionedIops: 16000, extendedStandardIops: 10000, dotClass: 'dot-warm', badgeClass: 'tier-warm', purpose: 'Steady mixed read/write workload' },
+      { tier: 'Cool', clusterClass: 'General', instanceType: 'M40', storageGB: 400, iopsMode: 'standard', provisionedIops: 12000, extendedStandardIops: 8000, dotClass: 'dot-cold', badgeClass: 'tier-cold', purpose: 'Lower-traffic shard within 2-tier gap' },
+      { tier: 'Cool', clusterClass: 'General', instanceType: 'M40', storageGB: 350, iopsMode: 'standard', provisionedIops: 10000, extendedStandardIops: 7000, dotClass: 'dot-archive', badgeClass: 'tier-archive', purpose: 'Compliance / long-tail data, same replica-set shape' },
+    ],
+  },
+  analytics: {
+    label: 'Analytic Tier',
+    description: 'Each shard keeps its electable and read-only nodes on one cluster tier, while analytic nodes run on a different tier. This models the supported asymmetric analytic tier per shard.',
+    shards: [
+      { tier: 'OLTP + Analytics', clusterClass: 'General', instanceType: 'M50', analyticsClass: 'General', analyticsInstanceType: 'M40', analyticNodes: 1, storageGB: 500, iopsMode: 'provisioned', provisionedIops: 16000, extendedStandardIops: 10000, dotClass: 'dot-hot', analyticsDotClass: 'dot-analytic', badgeClass: 'tier-hot', purpose: 'Electable/read-only nodes stay on M50; analytic nodes run on M40' },
+      { tier: 'OLTP + Analytics', clusterClass: 'General', instanceType: 'M50', analyticsClass: 'General', analyticsInstanceType: 'M40', analyticNodes: 1, storageGB: 450, iopsMode: 'provisioned', provisionedIops: 15000, extendedStandardIops: 9000, dotClass: 'dot-hot', analyticsDotClass: 'dot-analytic', badgeClass: 'tier-hot', purpose: 'BI queries isolated on analytic tier per shard' },
+      { tier: 'Balanced Analytics', clusterClass: 'General', instanceType: 'M40', analyticsClass: 'General', analyticsInstanceType: 'M30', analyticNodes: 1, storageGB: 380, iopsMode: 'standard', provisionedIops: 12000, extendedStandardIops: 7000, dotClass: 'dot-warm', analyticsDotClass: 'dot-analytic', badgeClass: 'tier-analytics', purpose: 'Lower-traffic shard with smaller analytic tier' },
+      { tier: 'Balanced Analytics', clusterClass: 'General', instanceType: 'M40', analyticsClass: 'General', analyticsInstanceType: 'M30', analyticNodes: 1, storageGB: 360, iopsMode: 'standard', provisionedIops: 10000, extendedStandardIops: 6500, dotClass: 'dot-warm', analyticsDotClass: 'dot-analytic', badgeClass: 'tier-analytics', purpose: 'Same shard shape, lower analytic compute footprint' },
+    ],
+  },
+  iops: {
+    label: 'Storage / IOPS',
+    description: 'Per-shard storage behavior changes by cloud provider. AWS can mix Standard and Provisioned IOPS per shard; Azure can vary Standard IOPS per shard only in Pv2 / Extended Standard IOPS regions; GCP ties IOPS to storage size.',
+    shards: [
+      { tier: 'Provisioned', clusterClass: 'General', instanceType: 'M50', storageGB: 500, iopsMode: 'provisioned', provisionedIops: 18000, extendedStandardIops: 12000, dotClass: 'dot-hot', badgeClass: 'tier-hot', purpose: 'High-write shard with independent IOPS tuning' },
+      { tier: 'Provisioned', clusterClass: 'General', instanceType: 'M50', storageGB: 450, iopsMode: 'provisioned', provisionedIops: 14000, extendedStandardIops: 9500, dotClass: 'dot-warm', badgeClass: 'tier-warm', purpose: 'Different provisioned IOPS on another shard' },
+      { tier: 'Standard', clusterClass: 'General', instanceType: 'M40', storageGB: 380, iopsMode: 'standard', provisionedIops: 12000, extendedStandardIops: 7500, dotClass: 'dot-cold', badgeClass: 'tier-cold', purpose: 'IOPS tied to storage size on Standard storage' },
+      { tier: 'Standard', clusterClass: 'General', instanceType: 'M40', storageGB: 320, iopsMode: 'standard', provisionedIops: 10000, extendedStandardIops: 6500, dotClass: 'dot-archive', badgeClass: 'tier-archive', purpose: 'Lower-throughput shard, still within 2-tier compute gap' },
+    ],
+  },
+};
+
+const ASYMMETRIC_LAYOUTS = {
+  2: [0, 2],
+  3: [0, 1, 2],
+  4: [0, 1, 2, 3],
+};
+
+function getAsymmetricProviderStorageText(profile) {
+  if (state.asymmetricCloud === 'aws') {
+    return profile.iopsMode === 'provisioned'
+      ? `${profile.storageGB} GB · Provisioned IOPS ${profile.provisionedIops.toLocaleString()} (per-shard)`
+      : `${profile.storageGB} GB · Standard IOPS tied to storage size`;
+  }
+
+  if (state.asymmetricCloud === 'azure') {
+    return state.azureExtendedIops
+      ? `${profile.storageGB} GB · Extended Standard IOPS ${profile.extendedStandardIops.toLocaleString()} (per-shard Pv2)`
+      : `${profile.storageGB} GB · Standard IOPS tied to storage size`;
+  }
+
+  return `${profile.storageGB} GB · IOPS tied to storage size`;
+}
+
+function getAsymmetricProviderNote() {
+  if (state.asymmetricCloud === 'aws') {
+    return 'AWS: each shard can use Standard or Provisioned IOPS; Provisioned IOPS can differ per shard.';
+  }
+  if (state.asymmetricCloud === 'azure') {
+    return state.azureExtendedIops
+      ? 'Azure Pv2 / Extended Standard IOPS: Standard IOPS can differ per shard.'
+      : 'Azure without Pv2: Standard IOPS stays tied to storage size.';
+  }
+  return 'GCP: IOPS stays tied to storage size for each shard.';
+}
+
+function getAsymmetricProfiles() {
+  const preset = ASYMMETRIC_PRESETS[state.asymmetricPreset];
+  const layout = ASYMMETRIC_LAYOUTS[state.shardCount] || ASYMMETRIC_LAYOUTS[4];
+  return layout.map(idx => {
+    const profile = { ...preset.shards[idx] };
+    profile.storageLabel = getAsymmetricProviderStorageText(profile);
+    return profile;
+  });
+}
 
 // ===== QUERY EXECUTOR STATE =====
 let qeRunning = false;
@@ -587,9 +669,11 @@ function hashToShard(val, n) {
 function getShards() {
   const count = state.shardCount;
   const zones = ZONES[state.regionMode];
+  const profiles = state.asymmetric ? getAsymmetricProfiles() : [];
   return Array.from({ length: count }, (_, i) => {
     const zone = zones[i % zones.length];
     const docs = state.documents.filter(d => d._shardIdx === i);
+    const profile = state.asymmetric ? profiles[i % profiles.length] : null;
     return {
       index: i,
       name: `shard${i + 1}`,
@@ -597,6 +681,7 @@ function getShards() {
       zone,
       docs,
       docCount: docs.length,
+      profile,
     };
   });
 }
@@ -750,9 +835,36 @@ function renderTopology() {
 
     <div class="topo-section">
       <div class="topo-section-label">
-        Shard Replica Sets (${shards.length} shards × ${state.nodesPerShard} nodes)
+        ${state.asymmetric
+          ? `Shard Replica Sets (${shards.length} shards — asymmetric, preset: <strong>${ASYMMETRIC_PRESETS[state.asymmetricPreset].label}</strong>)`
+          : `Shard Replica Sets (${shards.length} shards × ${state.nodesPerShard} nodes)`
+        }
       </div>
+      ${state.asymmetric ? buildAsymmetricBanner() : ''}
       ${shardHTML}
+    </div>
+  `;
+}
+
+function buildAsymmetricBanner() {
+  const preset = ASYMMETRIC_PRESETS[state.asymmetricPreset];
+  return `
+    <div class="asymmetric-banner">
+      <div class="asym-banner-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="9" rx="1"/>
+          <rect x="14" y="3" width="7" height="5" rx="1"/>
+          <rect x="14" y="12" width="7" height="9" rx="1"/>
+          <rect x="3" y="16" width="7" height="5" rx="1"/>
+        </svg>
+      </div>
+      <div class="asym-banner-body">
+        <div class="asym-banner-title">Asymmetric Sharding — ${preset.label}</div>
+        <div class="asym-banner-desc">${preset.description}</div>
+        <div class="asym-banner-desc" style="margin-top:4px;color:var(--text-muted);font-size:11px;">Manual per-shard scaling is supported through the Admin API, AtlasCLI, or Terraform. Atlas UI does not directly edit per-shard tiers.</div>
+        <div class="asym-banner-desc" style="margin-top:4px;color:var(--text-muted);font-size:11px;">Auto-scaler can scale shards asymmetrically only within the same cluster tier class, with at most a two-tier gap between the largest and smallest shard.</div>
+        <div class="asym-banner-desc" style="margin-top:4px;color:var(--text-muted);font-size:11px;">${getAsymmetricProviderNote()}</div>
+      </div>
     </div>
   `;
 }
@@ -802,12 +914,53 @@ function buildShardCard(s) {
   const fillPct = totalDocs > 0 ? Math.round((s.docCount / totalDocs) * 100) : 0;
   const barColor = `var(--shard-${s.index % 4})`;
 
+  let asymmetricHighlight = '';
+  if (state.asymmetric && s.profile) {
+    const preset = state.asymmetricPreset;
+    if (preset === 'tiered') {
+      // Show the actual instance type that varies across shards (M60, M50, M40, etc.)
+      asymmetricHighlight = `<div class="asymmetric-highlight asymmetric-tier">◆ Instance: <strong>${s.profile.instanceType}</strong></div>`;
+    } else if (preset === 'analytics' && s.profile.analyticsInstanceType) {
+      // Show both OLTP and Analytics instance types
+      asymmetricHighlight = `<div class="asymmetric-highlight asymmetric-analytics">◆ Analytics: <strong>${s.profile.instanceType} + ${s.profile.analyticsInstanceType}</strong></div>`;
+    } else if (preset === 'iops') {
+      // Show the actual IOPS mode and value based on cloud provider
+      if (state.asymmetricCloud === 'aws') {
+        const iopsLabel = s.profile.iopsMode === 'provisioned' 
+          ? `Provisioned ${s.profile.provisionedIops.toLocaleString()} IOPS`
+          : 'Standard IOPS';
+        asymmetricHighlight = `<div class="asymmetric-highlight asymmetric-iops">◆ IOPS: <strong>${iopsLabel}</strong></div>`;
+      } else if (state.asymmetricCloud === 'azure') {
+        const iopsLabel = state.azureExtendedIops
+          ? `Extended ${s.profile.extendedStandardIops.toLocaleString()} IOPS`
+          : 'Standard IOPS';
+        asymmetricHighlight = `<div class="asymmetric-highlight asymmetric-iops">◆ IOPS: <strong>${iopsLabel}</strong></div>`;
+      } else {
+        // GCP: show storage size since IOPS is tied to it
+        asymmetricHighlight = `<div class="asymmetric-highlight asymmetric-iops">◆ Storage: <strong>${s.profile.storageGB} GB</strong></div>`;
+      }
+    }
+  }
+
+  const profileHTML = (state.asymmetric && s.profile) ? `
+    <div class="shard-tier-bar">
+      <span class="tier-badge ${s.profile.badgeClass}">${s.profile.tier}</span>
+      <span class="tier-class-badge">${s.profile.clusterClass}</span>
+      <span class="tier-instance">${s.profile.instanceType}</span>
+    </div>
+    <div class="tier-subline">Electable/read-only: ${s.profile.clusterClass} ${s.profile.instanceType}${s.profile.analyticsInstanceType ? ` · Analytic: ${s.profile.analyticsClass} ${s.profile.analyticsInstanceType}` : ''}</div>
+    ${asymmetricHighlight}
+    <div class="tier-storage">${s.profile.storageLabel}</div>
+    <div class="tier-purpose">${s.profile.purpose}</div>
+  ` : '';
+
   return `
-    <div class="shard-card" id="shard-card-${s.index}" data-shard="${s.index % 4}">
+    <div class="shard-card ${state.asymmetric ? 'shard-card-asymmetric' : ''}" id="shard-card-${s.index}" data-shard="${s.index % 4}">
       <div class="shard-header">
         <div class="shard-name">${s.rsName} / ${s.name}</div>
         <div class="shard-doc-count" id="doc-count-${s.index}">${s.docCount} docs</div>
       </div>
+      ${profileHTML}
       <div class="shard-nodes">${nodes}</div>
       <div class="shard-range-info">
         <span class="range-label">${rangeInfo}</span>
@@ -822,12 +975,17 @@ function buildShardCard(s) {
 }
 
 function buildNodeList(s) {
-  const n = state.nodesPerShard;
+  const n = Math.max(state.nodesPerShard, 3);
+  const profile = s.profile;
   const nodes = [];
-  nodes.push({ role: 'PRIMARY', name: `${s.name}-p1`, dot: 'dot-primary', badge: 'badge-primary' });
-  const secCount = n <= 1 ? 0 : n - 1;
+  nodes.push({ role: 'PRIMARY', name: `${s.name}-p1`, dot: profile ? profile.dotClass : 'dot-primary', badge: 'badge-primary' });
+  const secCount = n - 1;
   for (let i = 0; i < secCount; i++) {
-    nodes.push({ role: 'SECONDARY', name: `${s.name}-s${i + 1}`, dot: 'dot-secondary', badge: 'badge-secondary' });
+    nodes.push({ role: 'SECONDARY', name: `${s.name}-s${i + 1}`, dot: profile ? profile.dotClass : 'dot-secondary', badge: 'badge-secondary' });
+  }
+  const analyticNodes = profile?.analyticNodes || 0;
+  for (let i = 0; i < analyticNodes; i++) {
+    nodes.push({ role: 'ANALYTIC', name: `${s.name}-a${i + 1}`, dot: profile?.analyticsDotClass || 'dot-analytic', badge: 'badge-analytic' });
   }
   return nodes.map(node => `
     <div class="shard-node">
@@ -1994,7 +2152,21 @@ function initEventListeners() {
     state.mongosCount = 1;
     state.documents = [];
     state.isBulkLoading = false;
+    state.asymmetric = false;
+    state.asymmetricPreset = 'tiered';
+    state.asymmetricCloud = 'aws';
+    state.azureExtendedIops = true;
     docSeq = 0;
+    const asymToggle = document.getElementById('asymmetric-toggle');
+    if (asymToggle) { asymToggle.classList.remove('active'); asymToggle.textContent = 'Off'; }
+    const presetPanel = document.getElementById('asymmetric-preset-panel');
+    if (presetPanel) presetPanel.classList.add('hidden-section');
+    document.querySelectorAll('.asym-preset-btn').forEach(b => b.classList.toggle('active', b.dataset.preset === 'tiered'));
+    document.querySelectorAll('.asym-cloud-btn').forEach(b => b.classList.toggle('active', b.dataset.cloud === 'aws'));
+    const azureIopsRow = document.getElementById('azure-iops-row');
+    if (azureIopsRow) azureIopsRow.classList.add('hidden-section');
+    const azureExtendedToggle = document.getElementById('azure-extended-toggle');
+    if (azureExtendedToggle) { azureExtendedToggle.classList.add('active'); azureExtendedToggle.textContent = 'On'; }
     const bpw = document.getElementById('bulk-progress-wrap');
     if (bpw) bpw.style.display = 'none';
     // Reset UI toggles
@@ -2013,6 +2185,57 @@ function initEventListeners() {
   function resetCountBtns(groupId, val) {
     document.querySelectorAll(`#${groupId} .count-btn`).forEach(b => {
       b.classList.toggle('active', b.dataset.count === val || b.dataset.nodes === val || b.dataset.mongos === val);
+    });
+  }
+
+  // Asymmetric mode toggle
+  const asymToggle = document.getElementById('asymmetric-toggle');
+
+  if (asymToggle) {
+    asymToggle.addEventListener('click', () => {
+      state.asymmetric = !state.asymmetric;
+      asymToggle.classList.toggle('active', state.asymmetric);
+      asymToggle.textContent = state.asymmetric ? 'On' : 'Off';
+      const presetPanel = document.getElementById('asymmetric-preset-panel');
+      if (presetPanel) presetPanel.classList.toggle('hidden-section', !state.asymmetric);
+      renderTopology();
+      addLog('info', state.asymmetric
+        ? `Asymmetric mode <strong>ON</strong> — ${ASYMMETRIC_PRESETS[state.asymmetricPreset].label}, ${state.shardCount} shard${state.shardCount > 1 ? 's' : ''}, provider: ${state.asymmetricCloud.toUpperCase()}`
+        : 'Asymmetric mode <strong>OFF</strong> — uniform topology restored.');
+    });
+  }
+
+  // Asymmetric preset selector
+  document.getElementById('asymmetric-preset-group')?.addEventListener('click', e => {
+    const btn = e.target.closest('.asym-preset-btn');
+    if (!btn) return;
+    document.querySelectorAll('.asym-preset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.asymmetricPreset = btn.dataset.preset;
+    renderTopology();
+    addLog('info', `Asymmetric preset: <strong>${ASYMMETRIC_PRESETS[state.asymmetricPreset].label}</strong>`);
+  });
+
+  document.getElementById('asymmetric-cloud-group')?.addEventListener('click', e => {
+    const btn = e.target.closest('.asym-cloud-btn');
+    if (!btn) return;
+    document.querySelectorAll('.asym-cloud-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.asymmetricCloud = btn.dataset.cloud;
+    const azureIopsRow = document.getElementById('azure-iops-row');
+    if (azureIopsRow) azureIopsRow.classList.toggle('hidden-section', state.asymmetricCloud !== 'azure');
+    renderTopology();
+    addLog('info', `Asymmetric cloud profile: <strong>${state.asymmetricCloud.toUpperCase()}</strong>`);
+  });
+
+  const azureExtendedToggle = document.getElementById('azure-extended-toggle');
+  if (azureExtendedToggle) {
+    azureExtendedToggle.addEventListener('click', () => {
+      state.azureExtendedIops = !state.azureExtendedIops;
+      azureExtendedToggle.classList.toggle('active', state.azureExtendedIops);
+      azureExtendedToggle.textContent = state.azureExtendedIops ? 'On' : 'Off';
+      renderTopology();
+      addLog('info', `Azure Extended Standard IOPS <strong>${state.azureExtendedIops ? 'enabled' : 'disabled'}</strong>.`);
     });
   }
 

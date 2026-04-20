@@ -2389,6 +2389,152 @@ input { font-family: inherit; font-size: inherit; }
   color: #86efac;
 }
 
+/* ===== Asymmetric Sharding ===== */
+.asym-toggle { min-width: 48px; text-align: center; }
+.asym-toggle.active { background: var(--mongo-green) !important; color: #001E2B !important; border-color: var(--mongo-green) !important; }
+
+/* Shard count buttons locked in asymmetric mode */
+.count-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+.asym-preset-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.asym-preset-btn {
+  padding: 5px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.asym-preset-btn:hover { border-color: var(--mongo-green); color: var(--mongo-green); }
+.asym-preset-btn.active { border-color: var(--mongo-green); color: var(--mongo-green); background: rgba(0,237,100,0.08); font-weight: 600; }
+
+/* Asymmetric banner inside topology */
+.asymmetric-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(0,237,100,0.06);
+  border: 1px solid rgba(0,237,100,0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+.asym-banner-icon {
+  color: var(--mongo-green);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.asym-banner-title {
+  font-weight: 700;
+  color: var(--mongo-green);
+  font-size: 12.5px;
+  margin-bottom: 3px;
+}
+.asym-banner-desc { color: var(--text-secondary); line-height: 1.5; }
+
+/* Per-shard tier badges inside shard cards */
+.shard-card-asymmetric { border-top: 2px solid var(--border); }
+.shard-tier-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 6px;
+  flex-wrap: wrap;
+}
+.tier-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.tier-hot     { background: rgba(239,68,68,0.15);  color: #FCA5A5; border: 1px solid rgba(239,68,68,0.4); }
+.tier-warm    { background: rgba(245,158,11,0.15); color: #FCD34D; border: 1px solid rgba(245,158,11,0.4); }
+.tier-cold    { background: rgba(59,130,246,0.15); color: #93C5FD; border: 1px solid rgba(59,130,246,0.4); }
+.tier-archive { background: rgba(107,114,128,0.2); color: #9CA3AF; border: 1px solid rgba(107,114,128,0.4); }
+.tier-analytics { background: rgba(168,85,247,0.15); color: #C4B5FD; border: 1px solid rgba(168,85,247,0.4); }
+
+.tier-class-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.tier-instance {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: monospace;
+}
+.tier-subline {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.asymmetric-highlight {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  margin: 5px 0;
+  padding: 5px 8px;
+  border-radius: 4px;
+  border-left: 3px solid;
+}
+
+.asymmetric-tier {
+  background: rgba(147, 112, 219, 0.12);
+  border-left-color: #9370DB;
+  color: #7851A9;
+}
+
+.asymmetric-analytics {
+  background: rgba(74, 144, 226, 0.12);
+  border-left-color: #4A90E2;
+  color: #2563EB;
+}
+
+.asymmetric-iops {
+  background: rgba(245, 158, 11, 0.12);
+  border-left-color: #F59E0B;
+  color: #D97706;
+}
+
+.tier-storage {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.tier-purpose {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+/* Shard-node dot overrides for tier colours */
+.dot-hot     { background: #EF4444 !important; }
+.dot-warm    { background: #F59E0B !important; }
+.dot-cold    { background: #3B82F6 !important; }
+.dot-archive { background: #6B7280 !important; }
+.dot-analytic { background: #A855F7 !important; }
+
+/* Role badges */
+.badge-hidden  { background: rgba(168,85,247,0.15); color: #C4B5FD; border: 1px solid rgba(168,85,247,0.4); }
+.badge-arbiter { background: rgba(245,158,11,0.15); color: #FCD34D; border: 1px solid rgba(245,158,11,0.4); }
+.badge-analytic { background: rgba(168,85,247,0.15); color: #C4B5FD; border: 1px solid rgba(168,85,247,0.4); }
+
 /* ===== Jumbo Chunk Modal ===== */
 .jumbo-modal-overlay {
   position: fixed;
