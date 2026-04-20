@@ -333,6 +333,40 @@ const QUERY_DEFS = {
       })),
       explanation: '$lookup on a non-co-located collection forces scatter-gather + cross-shard document fetch from the primary shard. Consider materializing joins with Zone sharding for OLTP workloads.',
     },
+    {
+      id: 'rng_insert_one',
+      name: 'insertOne — Single-Shard Write',
+      type: 'targeted',
+      isWrite: true,
+      writeKind: 'insert',
+      code: () => {
+        const sk = state.shardKey;
+        if (sk === 'customer_id') return `db.orders.insertOne({\n  customer_id: "C025000",\n  order_id: 999001,\n  order_date: "2024-06-15",\n  status: "pending",\n  total: 249.99\n})`;
+        if (sk === 'order_date') return `db.orders.insertOne({\n  order_date: "2022-06-15",\n  order_id: 999001,\n  customer_id: "C012345",\n  status: "pending",\n  total: 249.99\n})`;
+        return `db.orders.insertOne({\n  order_id: 999001,\n  customer_id: "C012345",\n  order_date: "2024-06-15",\n  status: "pending",\n  total: 249.99\n})`;
+      },
+      explain: () => `EXTRACT_SHARD_KEY → RESOLVE_CHUNK → SINGLE_SHARD_WRITE`,
+      getTargetShards: () => {
+        const n = state.shardCount, sk = state.shardKey;
+        if (sk === 'customer_id') { const seg = Math.ceil(99999 / n); return [Math.min(Math.floor(25000 / seg), n - 1)]; }
+        if (sk === 'order_date') return [Math.max(0, Math.min(Math.floor(((2022 - 2020) / 5) * n), n - 1))];
+        return [n - 1];
+      },
+      filterDocs: () => [{ acknowledged: true, insertedId: `ObjectId("${Date.now().toString(16)}")` }],
+      explanation: 'Insert includes the shard key → mongos resolves the owning chunk and routes the write to exactly 1 shard. Every insert MUST include the full shard key; MongoDB rejects the write otherwise.',
+    },
+    {
+      id: 'rng_update_many',
+      name: 'updateMany — Multi-Shard Write',
+      type: 'scatter',
+      isWrite: true,
+      writeKind: 'update',
+      code: () => `db.orders.updateMany(\n  { status: "pending" },\n  { $set: { status: "processing", updated_at: new Date() } }\n)`,
+      explain: () => `NO_SHARD_KEY_IN_FILTER → BROADCAST_UPDATE → ALL_SHARDS`,
+      getTargetShards: () => Array.from({ length: state.shardCount }, (_, i) => i),
+      filterDocs: (shardDocs) => shardDocs.filter(d => d.status === 'pending').slice(0, 6),
+      explanation: 'Filter has no shard key → mongos broadcasts the update to ALL shards. Each shard modifies its locally-owned matching documents in parallel. Include the shard key to turn this into a targeted write.',
+    },
   ],
   hashed: [
     {
@@ -426,6 +460,41 @@ const QUERY_DEFS = {
       isAggregate: true,
       explanation: 'distinct() fans out to all shards; each returns its local set of unique values. Mongos unions and de-duplicates across shard results before returning.',
     },
+    {
+      id: 'hash_insert_one',
+      name: 'insertOne — Single-Shard Write',
+      type: 'targeted',
+      isWrite: true,
+      writeKind: 'insert',
+      code: () => {
+        const sk = state.shardKey;
+        const v = sk === 'email'
+          ? '"newuser@example.com"'
+          : sk === 'user_id'
+            ? '"a1b2c3d4-e5f6-4abc-8def-123456789abc"'
+            : 'ObjectId("6507abc999")';
+        return `db.users.insertOne({\n  ${sk}: ${v},\n  username: "new_user_${docSeq || 1}",\n  plan: "pro",\n  country: "US",\n  created_at: new Date()\n})`;
+      },
+      explain: () => `HASH(shard_key) → SINGLE_SHARD_WRITE`,
+      getTargetShards: () => {
+        const v = state.shardKey === 'email' ? 'newuser@example.com' : 'a1b2c3d4-new-user';
+        return [fnv32(v) % state.shardCount];
+      },
+      filterDocs: () => [{ acknowledged: true, insertedId: `ObjectId("${Date.now().toString(16)}")` }],
+      explanation: 'Mongos hashes the shard-key value, maps it to the owning chunk, and routes the insert to exactly 1 shard. Hashed writes distribute uniformly across the cluster — no hotspotting on monotonic keys.',
+    },
+    {
+      id: 'hash_update_many',
+      name: 'updateMany — Multi-Shard Write',
+      type: 'scatter',
+      isWrite: true,
+      writeKind: 'update',
+      code: () => `db.users.updateMany(\n  { plan: "free" },\n  { $set: { plan: "starter", upgraded_at: new Date() } }\n)`,
+      explain: () => `NO_SHARD_KEY → BROADCAST_UPDATE → ALL_SHARDS`,
+      getTargetShards: () => Array.from({ length: state.shardCount }, (_, i) => i),
+      filterDocs: (shardDocs) => shardDocs.filter(d => d.plan === 'free').slice(0, 6),
+      explanation: 'Filter does not include the hashed shard key → mongos cannot hash-prune. Every shard receives the update and applies it to its local matches in parallel.',
+    },
   ],
   zone: [
     {
@@ -508,6 +577,38 @@ const QUERY_DEFS = {
         amount: +(Math.random() * 5000 + 500).toFixed(2),
       })),
       explanation: '$lookup on a non-zone-sharded collection fetches from the primary shard. Cross-zone $lookup incurs scatter latency + cross-region data movement. Co-locate billing with user_data using matching zone keys to avoid this.',
+    },
+    {
+      id: 'zone_insert_one',
+      name: 'insertOne — Single-Zone Write',
+      type: 'targeted',
+      isWrite: true,
+      writeKind: 'insert',
+      code: () => {
+        const sk = state.shardKey;
+        if (sk === 'country') return `db.user_data.insertOne({\n  user_id: "U00099001",\n  country: "DE",\n  region: "europe",\n  tier: "pro",\n  datacenter: "eu-west-1"\n})`;
+        return `db.user_data.insertOne({\n  user_id: "U00099001",\n  region: "europe",\n  country: "DE",\n  tier: "pro",\n  datacenter: "eu-west-1"\n})`;
+      },
+      explain: () => `ZONE_KEY_MATCH → SINGLE_ZONE_SHARD_WRITE`,
+      getTargetShards: () => {
+        if (state.regionMode === 'multi') return [Math.min(1, state.shardCount - 1)];
+        const v = state.shardKey === 'country' ? 'DE' : 'europe';
+        return [fnv32(v) % state.shardCount];
+      },
+      filterDocs: () => [{ acknowledged: true, insertedId: `ObjectId("${Date.now().toString(16)}")` }],
+      explanation: 'Zone prefix in the document → mongos pins the write to the Europe-zone shard. Data never leaves the EU region — critical for GDPR data-residency compliance.',
+    },
+    {
+      id: 'zone_update_many',
+      name: 'updateMany — Multi-Zone Write',
+      type: 'scatter',
+      isWrite: true,
+      writeKind: 'update',
+      code: () => `db.user_data.updateMany(\n  { tier: "free" },\n  { $set: { tier: "starter", upgraded_at: new Date() } }\n)`,
+      explain: () => `NO_ZONE_PREFIX → BROADCAST_UPDATE → ALL_ZONES`,
+      getTargetShards: () => Array.from({ length: state.shardCount }, (_, i) => i),
+      filterDocs: (shardDocs) => shardDocs.filter(d => d.tier === 'free').slice(0, 6),
+      explanation: 'Filter has no zone prefix → mongos cannot prune zones and must broadcast the update across every region. Cross-region writes pay WAN latency on each hop.',
     },
   ],
 };
@@ -1313,15 +1414,29 @@ async function executeQueryAnimation() {
 
     const shardDocs = shards[shardIdx]?.docs || [];
     const matched = queryDef.filterDocs(shardDocs);
-    const latencyMs = 2 + Math.floor(shardDocs.length * 0.05 + Math.random() * 14);
+    const isInsert = queryDef.isWrite && queryDef.writeKind === 'insert';
+    const examinedCount = isInsert ? 0 : shardDocs.length;
+    const latencyMs = 2 + Math.floor(examinedCount * 0.05 + Math.random() * 14);
 
     if (card) card.classList.remove('active-routing');
-    results[shardIdx] = { matched, examined: shardDocs.length, latencyMs };
-    setExecRowDone(shardIdx, matched.length, shardDocs.length, latencyMs, COLORS[shardIdx % 4]);
+    results[shardIdx] = { matched, examined: examinedCount, latencyMs };
+    setExecRowDone(shardIdx, matched.length, examinedCount, latencyMs, COLORS[shardIdx % 4]);
 
-    qfStep(`executes on primary, scans ${shardDocs.length} docs, matches <strong>${matched.length}</strong>`, {
+    let execText;
+    if (isInsert) {
+      execText = `applies insert on primary, writes <strong>1</strong> document`;
+    } else if (queryDef.isWrite) {
+      execText = `scans ${shardDocs.length} docs, updates <strong>${matched.length}</strong> matching`;
+    } else {
+      execText = `executes on primary, scans ${shardDocs.length} docs, matches <strong>${matched.length}</strong>`;
+    }
+    const detailText = queryDef.isWrite
+      ? `${isInsert ? 'single-doc insert' : 'broadcast updateMany'} · ${latencyMs} ms on-shard · replicates to secondaries`
+      : `${queryDef.isAggregate ? 'partial $group/$match' : 'IXSCAN/COLLSCAN'} · ${latencyMs} ms on-shard`;
+
+    qfStep(execText, {
       actor: shardNames(shardIdx), actorColor: COLORS[shardIdx % 4], variant: 'exec',
-      detail: `${queryDef.isAggregate ? 'partial $group/$match' : 'IXSCAN/COLLSCAN'} · ${latencyMs} ms on-shard`,
+      detail: detailText,
     });
   }));
 
@@ -1368,33 +1483,71 @@ async function executeQueryAnimation() {
   const totalLatency = maxLatency + (targetShards.length > 1 ? 2 + Math.floor(Math.random() * 6) : 0);
 
   // ----- PHASE 7: Mongos → Client (final results) -----
-  qfSetPhase(`mongos returns ${allDocs.length} document${allDocs.length !== 1 ? 's' : ''} to client`, 'phase-done');
+  const isWrite = !!queryDef.isWrite;
+  const isInsertWrite = isWrite && queryDef.writeKind === 'insert';
+  const writtenCount = isInsertWrite ? targetShards.length : allDocs.length;
+  const verbNoun = isInsertWrite
+    ? `inserted ${writtenCount} document${writtenCount !== 1 ? 's' : ''}`
+    : isWrite
+      ? `modified ${writtenCount} document${writtenCount !== 1 ? 's' : ''}`
+      : `${allDocs.length} document${allDocs.length !== 1 ? 's' : ''}`;
+
+  qfSetPhase(
+    isWrite
+      ? `mongos returns write acknowledgement (${verbNoun})`
+      : `mongos returns ${allDocs.length} document${allDocs.length !== 1 ? 's' : ''} to client`,
+    'phase-done',
+  );
   qfHighlightLine('qf-line-cm', '#E6EDF3', delay * 1.0);
   await qfPacket('qf-mongos', 'qf-client', '#E6EDF3', delay * 0.85, {
-    label: allDocs.length > 0 ? `${allDocs.length}` : '0',
+    label: isWrite ? 'ack' : (allDocs.length > 0 ? `${allDocs.length}` : '0'),
   });
   qfActivate('qf-client', delay * 0.7, '#00ED64');
 
-  qfStep(`returns <strong>${allDocs.length}</strong> document${allDocs.length !== 1 ? 's' : ''} to client · total ${totalLatency} ms`, {
-    actor: 'mongos', variant: 'done',
-    detail: `examined ${totalExamined} · returned ${allDocs.length} · shards hit ${targetShards.length}/${state.shardCount}`,
-  });
+  if (isWrite) {
+    qfStep(`returns <strong>{ acknowledged: true, ${isInsertWrite ? 'insertedCount' : 'modifiedCount'}: ${writtenCount} }</strong> · total ${totalLatency} ms`, {
+      actor: 'mongos', variant: 'done',
+      detail: `${verbNoun} · shards written ${targetShards.length}/${state.shardCount}`,
+    });
+  } else {
+    qfStep(`returns <strong>${allDocs.length}</strong> document${allDocs.length !== 1 ? 's' : ''} to client · total ${totalLatency} ms`, {
+      actor: 'mongos', variant: 'done',
+      detail: `examined ${totalExamined} · returned ${allDocs.length} · shards hit ${targetShards.length}/${state.shardCount}`,
+    });
+  }
   qfStepsDone();
 
-  setExecStatus(`${allDocs.length} doc${allDocs.length !== 1 ? 's' : ''} returned`, 'done');
+  setExecStatus(
+    isWrite ? `${verbNoun}` : `${allDocs.length} doc${allDocs.length !== 1 ? 's' : ''} returned`,
+    'done',
+  );
 
   // Summary row
+  const primaryLabel = isInsertWrite ? 'Inserted' : isWrite ? 'Modified' : 'Returned';
+  const primaryVal = isWrite ? writtenCount : allDocs.length;
+  const secondaryLabel = isWrite ? 'Scanned' : 'Examined';
   document.getElementById('qe-exec-summary').innerHTML = `
-    <div class="qe-sum-item"><span class="qe-sum-label">Returned:</span><span class="qe-sum-val highlight">${allDocs.length}</span></div>
-    <div class="qe-sum-item"><span class="qe-sum-label">Examined:</span><span class="qe-sum-val">${totalExamined}</span></div>
-    <div class="qe-sum-item"><span class="qe-sum-label">Shards hit:</span><span class="qe-sum-val">${targetShards.length} / ${state.shardCount}</span></div>
+    <div class="qe-sum-item"><span class="qe-sum-label">${primaryLabel}:</span><span class="qe-sum-val highlight">${primaryVal}</span></div>
+    <div class="qe-sum-item"><span class="qe-sum-label">${secondaryLabel}:</span><span class="qe-sum-val">${totalExamined}</span></div>
+    <div class="qe-sum-item"><span class="qe-sum-label">Shards ${isWrite ? 'written' : 'hit'}:</span><span class="qe-sum-val">${targetShards.length} / ${state.shardCount}</span></div>
     <div class="qe-sum-item"><span class="qe-sum-label">Latency:</span><span class="qe-sum-val">${totalLatency}ms</span></div>
-    ${targetShards.length > 1 ? '<div class="qe-sum-item"><span class="qe-sum-label">Phase:</span><span class="qe-sum-val">scatter-gather + merge</span></div>' : ''}
+    ${targetShards.length > 1 ? `<div class="qe-sum-item"><span class="qe-sum-label">Phase:</span><span class="qe-sum-val">${isWrite ? 'broadcast write' : 'scatter-gather + merge'}</span></div>` : ''}
   `;
 
   // Results panel
   const resultsEl = document.getElementById('qe-results');
-  if (allDocs.length === 0) {
+  if (isWrite) {
+    resultsEl.innerHTML = `
+      <div class="qe-results-header">
+        <span>Write Acknowledgement</span>
+        <span style="color:var(--text-muted)">${targetShards.length} shard${targetShards.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="qe-result-doc">${syntaxHighlight(`{
+  acknowledged: true,
+  ${isInsertWrite ? `insertedCount: ${writtenCount}` : `matchedCount: ${allDocs.length},\n  modifiedCount: ${writtenCount}`}
+}`)}</div>
+    `;
+  } else if (allDocs.length === 0) {
     resultsEl.innerHTML = `
       <div class="qe-results-header"><span>Results</span><span style="color:var(--text-muted)">0 documents</span></div>
       <div class="qe-results-empty">No documents matched — insert data first using "Insert Document" or "Insert 50 Docs".</div>
