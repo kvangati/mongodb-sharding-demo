@@ -2178,10 +2178,6 @@ function updateHeaderStats() {
     const shards   = bSt.shards.length;
     docsEl.textContent   = `${totalMB >= 1000 ? (totalMB / 1000).toFixed(2) + ' GB' : totalMB.toFixed(0) + ' MB'} data`;
     shardsEl.textContent = `${shards} shard${shards !== 1 ? 's' : ''}`;
-  } else if (activeTab === 'automerger') {
-    const totalMB = aSt.chunks.reduce((s, c) => s + c.sizeMB, 0);
-    docsEl.textContent   = `${aSt.chunks.length} chunks`;
-    shardsEl.textContent = `${aSt.shardCount} shards · ${totalMB.toFixed(0)} MB`;
   } else {
     docsEl.textContent   = `${state.documents.length} docs`;
     shardsEl.textContent = `${state.shardCount} shards`;
@@ -2412,9 +2408,8 @@ function initEventListeners() {
 
       // Hide irrelevant sidebar sections when balancer or limitations tab is active
       const isBalancer = tab.dataset.tab === 'balancer';
-      const isAutoMerger = tab.dataset.tab === 'automerger';
       const isLimitations = tab.dataset.tab === 'limitations';
-      const hideSidebar = isBalancer || isAutoMerger || isLimitations;
+      const hideSidebar = isBalancer || isLimitations;
       document.querySelectorAll('.strategy-section, .shardkey-section, .region-section, .cluster-section, .datasim-section')
         .forEach(s => s.classList.toggle('hidden-section', hideSidebar));
 
@@ -2425,13 +2420,6 @@ function initEventListeners() {
         bInitState(bSt.shardCount, bSt.chunksPerShard);
         renderBalancer();
         bLog('info', `Balancer tab opened — ${bSt.shardCount} shards × ${bSt.chunksPerShard} chunks, threshold: ${bThreshold()} MB (3 × ${bSt.chunkSizeMB} MB chunkSize).`);
-      }
-
-      // Lazy-render AutoMerger tab on first open
-      if (isAutoMerger) {
-        if (!aSt.initialized) aInitState();
-        renderAutoMerger();
-        aLog('info', 'AutoMerger tab opened. You can merge adjacent chunks and then run the same-tab balancer to resolve hot-shard skew.');
       }
     });
   });
@@ -3384,13 +3372,16 @@ function initBalSubtabs() {
 const bmSt = {
   initialized: false,
   running: false,
+  balanceRunning: false,
   animating: false,
   speed: 3,
   shardCount: 3,
   targetChunkMB: 128,
   checkIntervalSec: 30,
+  balanceThresholdMB: 128,
   merges: 0,
   rounds: 0,
+  balanceMoves: 0,
   chunks: [],
   log: [],
 };
@@ -3410,9 +3401,11 @@ function bmNewChunk({ shardIdx, zone, min, max, sizeMB }) {
 function bmInitState() {
   bmChunkSeq = 0;
   bmSt.running = false;
+  bmSt.balanceRunning = false;
   bmSt.animating = false;
   bmSt.merges = 0;
   bmSt.rounds = 0;
+  bmSt.balanceMoves = 0;
   bmSt.log = [];
   bmSt.chunks = [
     bmNewChunk({ shardIdx: 0, zone: 'americas', min: 0,   max: 9,   sizeMB: 18 }),
@@ -3472,6 +3465,34 @@ function bmPickNext(cands) {
   if (!ok.length) return null;
   ok.sort((a, b) => a.combinedMB - b.combinedMB || a.left.min - b.left.min);
   return ok[0];
+}
+
+function bmGetBalance() {
+  const sizes = Array.from({ length: bmSt.shardCount }, (_, s) =>
+    +bmSt.chunks.filter(c => c.shardIdx === s).reduce((sum, c) => sum + c.sizeMB, 0).toFixed(1)
+  );
+  const maxSize = Math.max(...sizes);
+  const minSize = Math.min(...sizes);
+  const maxIdx = sizes.indexOf(maxSize);
+  const minIdx = sizes.indexOf(minSize);
+  const diff = +(maxSize - minSize).toFixed(1);
+  return {
+    sizes,
+    maxSize,
+    minSize,
+    maxIdx,
+    minIdx,
+    diff,
+    threshold: bmSt.balanceThresholdMB,
+    isBalanced: diff <= bmSt.balanceThresholdMB,
+  };
+}
+
+function bmPickNextBalanceMove(bal) {
+  const sourceChunks = bmSt.chunks
+    .filter(c => c.shardIdx === bal.maxIdx)
+    .sort((a, b) => Math.abs(a.sizeMB - bal.diff / 2) - Math.abs(b.sizeMB - bal.diff / 2));
+  return sourceChunks[0] || null;
 }
 
 function bmLog(type, msg) {
@@ -3544,6 +3565,7 @@ function bmRenderAutoMerger() {
   const okCount    = candidates.filter(c => c.ok).length;
   const blocked    = candidates.length - okCount;
   const next       = bmPickNext(candidates);
+  const bal        = bmGetBalance();
   const spLabels   = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
 
   host.innerHTML = `
@@ -3618,14 +3640,34 @@ function bmRenderAutoMerger() {
           </div>
 
           <button class="bal-btn bal-btn-imbalance" id="bm-fragment" data-tooltip="<strong>Inject Fragmentation</strong><br>Adds a run of small adjacent chunks to simulate post-split fragmentation on one shard.">✂ Inject Fragmentation</button>
-          <button class="bal-btn ${bmSt.running?'bal-btn-stop':'bal-btn-run'}" id="bm-run-toggle" data-tooltip="<strong>Start / Stop AutoMerger</strong><br>Runs the merge loop, combining eligible adjacent chunks one per round until no eligible pair remains.">${bmSt.running ? '⏹ Stop AutoMerger' : '▶ Start AutoMerger'}</button>
-          <button class="bal-btn bal-btn-step" id="bm-step" ${bmSt.running||bmSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single merge round — picks the smallest eligible pair and combines it.">⏭ Step Once</button>
+          <button class="bal-btn ${bmSt.running?'bal-btn-stop':'bal-btn-run'}" id="bm-run-toggle" ${bmSt.balanceRunning?'disabled':''} data-tooltip="<strong>Start / Stop AutoMerger</strong><br>Runs the merge loop, combining eligible adjacent chunks one per round until no eligible pair remains.">${bmSt.running ? '⏹ Stop AutoMerger' : '▶ Start AutoMerger'}</button>
+          <button class="bal-btn bal-btn-step" id="bm-step" ${bmSt.running||bmSt.balanceRunning||bmSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single merge round — picks the smallest eligible pair and combines it.">⏭ Step Once</button>
           <button class="bal-btn bal-btn-reset" id="bm-reset" data-tooltip="<strong>Reset</strong><br>Restores the default chunk layout (3 shards, mixed zones, some mergeable and some blocked pairs).">↺ Reset Scenario</button>
 
           <div class="bm-speed-row">
             <label>Speed</label>
             <input type="range" id="bm-speed" min="1" max="5" value="${bmSt.speed}" class="bal-speed-slider">
             <span id="bm-speed-label">${spLabels[bmSt.speed]}</span>
+          </div>
+        </div>
+
+        <div class="bm-ctrl-card">
+          <div class="bm-ctrl-title">Cross-Shard Balancer</div>
+
+          <div class="bm-ctrl-row">
+            <span class="tip" data-tooltip="<strong>Rebalance threshold (MB)</strong><br>Balancer moves chunks only when the data-size difference between the hottest and coolest shard exceeds this threshold.">Rebalance threshold (MB)</span>
+            <div class="btn-group" id="bm-balance-threshold-btns">
+              ${[64, 128, 256].map(v => `<button class="count-btn ${bmSt.balanceThresholdMB===v?'active':''}" data-bm-bt="${v}">${v}</button>`).join('')}
+            </div>
+          </div>
+
+          <button class="bal-btn ${bmSt.balanceRunning?'bal-btn-stop':'bal-btn-run'}" id="bm-balance-toggle" ${bmSt.running?'disabled':''} data-tooltip="<strong>Start / Stop Balancer</strong><br>Moves chunks across shards to reduce hot-shard skew after AutoMerger consolidation.">${bmSt.balanceRunning ? '⏹ Stop Balancer' : '▶ Start Balancer'}</button>
+          <button class="bal-btn bal-btn-step" id="bm-balance-step" ${bmSt.running||bmSt.balanceRunning||bmSt.animating?'disabled':''} data-tooltip="<strong>Balance Step</strong><br>Executes one cross-shard balancing move from hottest shard to coolest shard.">⏭ Balance Step</button>
+
+          <div class="am-balance-state ${bal.isBalanced ? 'ok' : 'warn'}">
+            <div><span>Current diff</span><strong>${bal.diff} MB</strong></div>
+            <div><span>Threshold</span><strong>${bal.threshold} MB</strong></div>
+            <div><span>Moves</span><strong>${bmSt.balanceMoves}</strong></div>
           </div>
         </div>
 
@@ -3697,6 +3739,21 @@ async function bmAnimateMerge(pair) {
   bmSt.animating = false;
 }
 
+async function bmAnimateBalanceMove(chunk, toShardIdx) {
+  bmSt.animating = true;
+  const el = document.getElementById(`bm-chunk-${chunk.id}`);
+  if (el) el.classList.add('am-merging-out');
+  await sleep(bmSpeedMs() * 0.55);
+  chunk.shardIdx = toShardIdx;
+  chunk.justMerged = true;
+  bmRenderAutoMerger();
+  setTimeout(() => {
+    const c = bmSt.chunks.find(x => x.id === chunk.id);
+    if (c) c.justMerged = false;
+  }, bmSpeedMs() * 0.8);
+  bmSt.animating = false;
+}
+
 async function bmDoStep() {
   if (bmSt.animating) return false;
   bmSt.rounds++;
@@ -3725,8 +3782,45 @@ async function bmRunLoop() {
   bmRenderAutoMerger();
 }
 
+async function bmDoBalanceStep() {
+  if (bmSt.animating) return false;
+
+  const bal = bmGetBalance();
+  if (bal.isBalanced) {
+    bmLog('done', `Balancer idle: shard diff ${bal.diff} MB is within threshold (${bal.threshold} MB).`);
+    bmSt.balanceRunning = false;
+    bmRenderAutoMerger();
+    return false;
+  }
+
+  const chunk = bmPickNextBalanceMove(bal);
+  if (!chunk) {
+    bmLog('warn', 'No movable chunk found on the hottest shard.');
+    bmSt.balanceRunning = false;
+    bmRenderAutoMerger();
+    return false;
+  }
+
+  bmLog('merge', `Balancer move: ${chunk.id} (${chunk.sizeMB} MB) ${bmShardName(bal.maxIdx)} → ${bmShardName(bal.minIdx)}.`);
+  bmLog('info', '↳ This cross-shard move complements AutoMerger by reducing shard-level skew after metadata consolidation.');
+
+  await bmAnimateBalanceMove(chunk, bal.minIdx);
+  bmSt.balanceMoves++;
+  return true;
+}
+
+async function bmBalanceRunLoop() {
+  while (bmSt.balanceRunning) {
+    const moved = await bmDoBalanceStep();
+    if (!moved) break;
+    await sleep(bmSpeedMs() * 0.35);
+  }
+  bmSt.balanceRunning = false;
+  bmRenderAutoMerger();
+}
+
 function bmInjectFragmentation() {
-  if (bmSt.running || bmSt.animating) return;
+  if (bmSt.running || bmSt.balanceRunning || bmSt.animating) return;
   const shard = 1;
   const zone  = 'europe';
   const maxRange = Math.max(...bmSt.chunks.map(c => c.max));
@@ -3744,7 +3838,7 @@ function bmInjectFragmentation() {
 function initBmListeners() {
   document.getElementById('bm-target-btns')?.addEventListener('click', e => {
     const btn = e.target.closest('[data-bm-target]');
-    if (!btn || bmSt.running) return;
+    if (!btn || bmSt.running || bmSt.balanceRunning) return;
     bmSt.targetChunkMB = parseInt(btn.dataset.bmTarget, 10);
     bmLog('info', `Target chunk size updated to ${bmSt.targetChunkMB} MB.`);
     bmRenderAutoMerger();
@@ -3752,15 +3846,24 @@ function initBmListeners() {
 
   document.getElementById('bm-interval-btns')?.addEventListener('click', e => {
     const btn = e.target.closest('[data-bm-interval]');
-    if (!btn || bmSt.running) return;
+    if (!btn || bmSt.running || bmSt.balanceRunning) return;
     bmSt.checkIntervalSec = parseInt(btn.dataset.bmInterval, 10);
     bmLog('info', `AutoMerger check interval set to ${bmSt.checkIntervalSec}s (simulation cadence).`);
+    bmRenderAutoMerger();
+  });
+
+  document.getElementById('bm-balance-threshold-btns')?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-bm-bt]');
+    if (!btn || bmSt.running || bmSt.balanceRunning) return;
+    bmSt.balanceThresholdMB = parseInt(btn.dataset.bmBt, 10);
+    bmLog('info', `Balancer threshold changed to ${bmSt.balanceThresholdMB} MB.`);
     bmRenderAutoMerger();
   });
 
   document.getElementById('bm-fragment')?.addEventListener('click', bmInjectFragmentation);
 
   document.getElementById('bm-run-toggle')?.addEventListener('click', () => {
+    if (bmSt.balanceRunning) return;
     if (bmSt.running) {
       bmSt.running = false;
       bmLog('warn', 'AutoMerger stopped manually.');
@@ -3778,11 +3881,40 @@ function initBmListeners() {
     bmRunLoop();
   });
 
-  document.getElementById('bm-step')?.addEventListener('click', async () => {
+  document.getElementById('bm-balance-toggle')?.addEventListener('click', () => {
     if (bmSt.running) return;
+    if (bmSt.balanceRunning) {
+      bmSt.balanceRunning = false;
+      bmLog('warn', 'Balancer stopped manually.');
+      bmRenderAutoMerger();
+      return;
+    }
+
+    const bal = bmGetBalance();
+    if (bal.isBalanced) {
+      bmLog('info', `Cluster already balanced (diff ${bal.diff} MB ≤ threshold ${bal.threshold} MB).`);
+      return;
+    }
+
+    bmSt.balanceRunning = true;
+    bmLog('info', `Balancer started at threshold ${bmSt.balanceThresholdMB} MB.`);
+    bmRenderAutoMerger();
+    bmBalanceRunLoop();
+  });
+
+  document.getElementById('bm-step')?.addEventListener('click', async () => {
+    if (bmSt.running || bmSt.balanceRunning) return;
     const btn = document.getElementById('bm-step');
     if (btn) btn.disabled = true;
     await bmDoStep();
+    if (btn) btn.disabled = false;
+  });
+
+  document.getElementById('bm-balance-step')?.addEventListener('click', async () => {
+    if (bmSt.running || bmSt.balanceRunning) return;
+    const btn = document.getElementById('bm-balance-step');
+    if (btn) btn.disabled = true;
+    await bmDoBalanceStep();
     if (btn) btn.disabled = false;
   });
 
