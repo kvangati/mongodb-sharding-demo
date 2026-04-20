@@ -3327,3 +3327,215 @@ input { font-family: inherit; font-size: inherit; }
   border-radius: 4px;
   color: var(--text-primary);
 }
+
+/* =====================================================================
+   BALANCER-TAB SUB-TABS (Load Balancer / AutoMerger)
+   ===================================================================== */
+.bal-subtabs {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.bal-subtab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+.bal-subtab svg { flex-shrink: 0; opacity: 0.8; }
+.bal-subtab span {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: inherit;
+}
+.bal-subtab small {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-top: 1px;
+}
+.bal-subtab:hover {
+  background: var(--bg-card-2);
+  color: var(--text-primary);
+}
+.bal-subtab.active {
+  background: linear-gradient(135deg, rgba(0, 237, 100, 0.10), rgba(0, 163, 73, 0.05));
+  border-color: var(--mongo-green);
+  color: var(--text-primary);
+}
+.bal-subtab.active svg { opacity: 1; color: var(--mongo-green); }
+.bal-subtab.active small { color: var(--mongo-green); }
+
+.bal-subview { display: none; }
+.bal-subview.active { display: block; }
+
+/* =====================================================================
+   BALANCER-TAB AUTOMERGER (bm-*)
+   ===================================================================== */
+.bm-intro {
+  padding: 18px;
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.06), rgba(139, 92, 246, 0.03));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.bm-intro h3 {
+  margin: 0 0 6px 0;
+  font-size: 15px;
+  color: var(--text-primary);
+}
+.bm-lede {
+  margin: 0 0 14px 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.bm-lede strong { color: var(--text-primary); }
+
+.bm-explain-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.bm-explain-card {
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  position: relative;
+}
+.bm-explain-card h4 {
+  margin: 4px 0 8px 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.bm-explain-card p,
+.bm-explain-card ul {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.bm-explain-card ul {
+  padding-left: 16px;
+}
+.bm-explain-card li + li { margin-top: 4px; }
+.bm-explain-card strong { color: var(--text-primary); }
+.bm-explain-card code {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border-light);
+  padding: 0 4px;
+  border-radius: 3px;
+  color: var(--text-primary);
+}
+.bm-card-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+.bm-card-what  { border-left: 3px solid #3B82F6; }
+.bm-card-why   { border-left: 3px solid var(--mongo-green); }
+.bm-card-lim   { border-left: 3px solid #F59E0B; }
+
+.bm-facts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+.bm-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+}
+.bm-fact span {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.bm-fact strong {
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.bm-fact strong.bm-no { color: #F59E0B; }
+
+.bm-automerger-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.bm-automerger-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.bm-ctrl-card {
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bm-ctrl-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.bm-ctrl-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.bm-ctrl-row .btn-group { flex-shrink: 0; }
+.bm-speed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.bm-speed-row label { flex-shrink: 0; }
+.bm-speed-row input[type="range"] { flex: 1; }
+
+.bm-automerger-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .bm-explain-grid { grid-template-columns: 1fr; }
+  .bm-facts { grid-template-columns: repeat(2, 1fr); }
+  .bm-automerger-layout { grid-template-columns: 1fr; }
+}

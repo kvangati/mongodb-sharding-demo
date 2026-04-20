@@ -2641,6 +2641,22 @@ function renderBalancer() {
   const spLabels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
 
   panel.innerHTML = `
+    <!-- Sub-tab nav: Balancer vs AutoMerger -->
+    <div class="bal-subtabs" role="tablist">
+      <button class="bal-subtab active" data-bal-view="balancer" role="tab" aria-selected="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M4 12l8-4 8 4M3 19h18"/></svg>
+        <span>Load Balancer</span>
+        <small>Cross-shard chunk migration</small>
+      </button>
+      <button class="bal-subtab" data-bal-view="merger" role="tab" aria-selected="false">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 7h8M8 12h8M8 17h5"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        <span>AutoMerger</span>
+        <small>Metadata consolidation</small>
+      </button>
+    </div>
+
+    <!-- ========== BALANCER SUBVIEW ========== -->
+    <div class="bal-subview active" id="bal-view-balancer">
     <!-- How it works banner -->
     <div class="bal-intro">
       <h3>How the MongoDB Balancer Works</h3>
@@ -2784,9 +2800,16 @@ function renderBalancer() {
         <div class="jumbo-demo-area" id="jumbo-demo-area" style="display:none"></div>
       </div>
     </div>
+    </div> <!-- /#bal-view-balancer -->
+
+    <!-- ========== AUTOMERGER SUBVIEW ========== -->
+    <div class="bal-subview" id="bal-view-merger">
+      <div id="bm-automerger-host"></div>
+    </div>
   `;
 
   initBalancerListeners();
+  initBalSubtabs();
   updateHeaderStats();
 }
 
@@ -3284,6 +3307,458 @@ function initBalancerListeners() {
     bSt.showJumbo = !bSt.showJumbo;
     renderBalancer();
     bLog('info', bSt.showJumbo ? 'Jumbo section shown.' : 'Jumbo section hidden.');
+  });
+}
+
+// ===================================================================
+// ===== BALANCER-TAB AUTOMERGER MODULE (embedded) ====================
+// Parallel, isolated copy that lives inside the Load Balancer tab as
+// the "AutoMerger" sub-view. It keeps its own state and DOM IDs so it
+// does not interfere with the standalone AutoMerger tab.
+// ===================================================================
+
+function initBalSubtabs() {
+  document.querySelectorAll('.bal-subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const view = btn.dataset.balView;
+      document.querySelectorAll('.bal-subtab').forEach(b => {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      document.querySelectorAll('#tab-balancer .bal-subview').forEach(v => {
+        v.classList.toggle('active', v.id === `bal-view-${view}`);
+      });
+      if (view === 'merger') {
+        if (!bmSt.initialized) bmInitState();
+        bmRenderAutoMerger();
+      }
+    });
+  });
+}
+
+const bmSt = {
+  initialized: false,
+  running: false,
+  animating: false,
+  speed: 3,
+  shardCount: 3,
+  targetChunkMB: 128,
+  checkIntervalSec: 30,
+  merges: 0,
+  rounds: 0,
+  chunks: [],
+  log: [],
+};
+
+let bmChunkSeq = 0;
+
+function bmNewChunk({ shardIdx, zone, min, max, sizeMB }) {
+  bmChunkSeq++;
+  return {
+    id: `bm_${String(bmChunkSeq).padStart(3, '0')}`,
+    shardIdx, zone, min, max,
+    sizeMB: +sizeMB.toFixed(1),
+    justMerged: false,
+  };
+}
+
+function bmInitState() {
+  bmChunkSeq = 0;
+  bmSt.running = false;
+  bmSt.animating = false;
+  bmSt.merges = 0;
+  bmSt.rounds = 0;
+  bmSt.log = [];
+  bmSt.chunks = [
+    bmNewChunk({ shardIdx: 0, zone: 'americas', min: 0,   max: 9,   sizeMB: 18 }),
+    bmNewChunk({ shardIdx: 0, zone: 'americas', min: 10,  max: 19,  sizeMB: 22 }),
+    bmNewChunk({ shardIdx: 0, zone: 'americas', min: 20,  max: 29,  sizeMB: 64 }),
+    bmNewChunk({ shardIdx: 0, zone: 'americas', min: 30,  max: 39,  sizeMB: 20 }),
+    bmNewChunk({ shardIdx: 1, zone: 'europe',   min: 40,  max: 49,  sizeMB: 14 }),
+    bmNewChunk({ shardIdx: 1, zone: 'europe',   min: 50,  max: 59,  sizeMB: 16 }),
+    bmNewChunk({ shardIdx: 1, zone: 'europe',   min: 60,  max: 69,  sizeMB: 19 }),
+    bmNewChunk({ shardIdx: 1, zone: 'europe',   min: 70,  max: 79,  sizeMB: 92 }),
+    bmNewChunk({ shardIdx: 2, zone: 'asia',     min: 80,  max: 89,  sizeMB: 23 }),
+    bmNewChunk({ shardIdx: 2, zone: 'europe',   min: 90,  max: 99,  sizeMB: 21 }),
+    bmNewChunk({ shardIdx: 2, zone: 'asia',     min: 100, max: 109, sizeMB: 17 }),
+    bmNewChunk({ shardIdx: 2, zone: 'asia',     min: 110, max: 119, sizeMB: 20 }),
+  ];
+  bmSt.initialized = true;
+}
+
+function bmSpeedMs()     { return Math.max(120, 950 - bmSt.speed * 160); }
+function bmShardName(i)  { return `rs${i + 1}`; }
+function bmZoneClass(z)  {
+  if (z === 'americas') return 'am-zone-americas';
+  if (z === 'europe')   return 'am-zone-europe';
+  return 'am-zone-asia';
+}
+
+function bmCanMerge(l, r) {
+  if (!l || !r)                       return { ok: false, reason: 'missing chunk' };
+  if (l.shardIdx !== r.shardIdx)      return { ok: false, reason: 'different shard' };
+  if (l.zone !== r.zone)              return { ok: false, reason: 'different zone' };
+  if (l.max + 1 !== r.min)            return { ok: false, reason: 'non-contiguous range' };
+  if (l.sizeMB + r.sizeMB > bmSt.targetChunkMB) return { ok: false, reason: 'combined size > target' };
+  return { ok: true };
+}
+
+function bmFindCandidates() {
+  const out = [];
+  for (let s = 0; s < bmSt.shardCount; s++) {
+    const arr = bmSt.chunks.filter(c => c.shardIdx === s).sort((a, b) => a.min - b.min);
+    for (let i = 0; i < arr.length - 1; i++) {
+      const left = arr[i], right = arr[i + 1];
+      const check = bmCanMerge(left, right);
+      out.push({
+        left, right,
+        ok: check.ok,
+        reason: check.reason || '',
+        combinedMB: +(left.sizeMB + right.sizeMB).toFixed(1),
+        shardIdx: s,
+      });
+    }
+  }
+  return out;
+}
+
+function bmPickNext(cands) {
+  const ok = cands.filter(c => c.ok);
+  if (!ok.length) return null;
+  ok.sort((a, b) => a.combinedMB - b.combinedMB || a.left.min - b.left.min);
+  return ok[0];
+}
+
+function bmLog(type, msg) {
+  const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+  bmSt.log.unshift({ type, msg, time: now });
+  if (bmSt.log.length > 60) bmSt.log.pop();
+  const el = document.getElementById('bm-log-entries');
+  if (el) el.innerHTML = bmRenderLogHTML();
+}
+
+function bmRenderLogHTML() {
+  if (!bmSt.log.length) return '<div class="am-log-empty">No activity yet.</div>';
+  return bmSt.log.map(e => `
+    <div class="am-log-entry am-log-${e.type}">
+      <span class="am-log-time">${e.time}</span>
+      <span class="am-log-msg">${e.msg}</span>
+    </div>`).join('');
+}
+
+function bmRenderChunkHTML(c) {
+  return `
+    <div class="am-chunk ${bmZoneClass(c.zone)} ${c.justMerged ? 'just-merged' : ''}" id="bm-chunk-${c.id}">
+      <div class="am-chunk-top">
+        <span class="am-chunk-id">${c.id}</span>
+        <span class="am-chunk-size">${c.sizeMB} MB</span>
+      </div>
+      <div class="am-chunk-meta">
+        <span class="am-chip">${c.min} → ${c.max}</span>
+        <span class="am-chip am-chip-zone">${c.zone}</span>
+      </div>
+    </div>`;
+}
+
+function bmRenderShardHTML(shardIdx) {
+  const chunks = bmSt.chunks.filter(c => c.shardIdx === shardIdx).sort((a, b) => a.min - b.min);
+  const totalMB = chunks.reduce((s, c) => s + c.sizeMB, 0).toFixed(1);
+  return `
+    <div class="am-shard">
+      <div class="am-shard-head">
+        <span class="am-shard-name">${bmShardName(shardIdx)}</span>
+        <span class="am-shard-total">${chunks.length} chunks · ${totalMB} MB</span>
+      </div>
+      <div class="am-shard-chunks">
+        ${chunks.map(bmRenderChunkHTML).join('')}
+      </div>
+    </div>`;
+}
+
+function bmRenderCandidates(candidates) {
+  if (!candidates.length) return '<div class="am-empty">No adjacent pairs available.</div>';
+  const rows = candidates.slice(0, 12).map(c => {
+    const cls    = c.ok ? 'ok' : 'blocked';
+    const reason = c.ok ? 'mergeable' : c.reason;
+    return `
+      <div class="am-candidate ${cls}">
+        <span class="am-c-left">${bmShardName(c.shardIdx)} · ${c.left.min}-${c.left.max} + ${c.right.min}-${c.right.max}</span>
+        <span class="am-c-mid">${c.combinedMB} MB</span>
+        <span class="am-c-right">${reason}</span>
+      </div>`;
+  }).join('');
+  return `<div class="am-candidate-list">${rows}</div>`;
+}
+
+function bmRenderAutoMerger() {
+  const host = document.getElementById('bm-automerger-host');
+  if (!host) return;
+  if (!bmSt.initialized) bmInitState();
+
+  const candidates = bmFindCandidates();
+  const okCount    = candidates.filter(c => c.ok).length;
+  const blocked    = candidates.length - okCount;
+  const next       = bmPickNext(candidates);
+  const spLabels   = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
+
+  host.innerHTML = `
+    <!-- ===== Explainer ===== -->
+    <div class="bm-intro">
+      <h3>AutoMerger — Chunk Metadata Consolidation</h3>
+      <p class="bm-lede">
+        AutoMerger is a background task (tied to the balancer) that combines
+        <strong>contiguous, adjacent chunks on the same shard</strong> into fewer larger chunks.
+        It trims chunk-map metadata without moving any data between shards.
+      </p>
+      <div class="bm-explain-grid">
+        <div class="bm-explain-card bm-card-what">
+          <div class="bm-card-icon">📦</div>
+          <h4>What it does</h4>
+          <ul>
+            <li>Scans chunk metadata on the config server.</li>
+            <li>Finds adjacent chunks on the <strong>same shard</strong> with compatible zone/tag.</li>
+            <li>Merges them into a single chunk, updating the chunk map.</li>
+            <li>No documents move — purely a metadata operation.</li>
+          </ul>
+        </div>
+        <div class="bm-explain-card bm-card-why">
+          <div class="bm-card-icon">✨</div>
+          <h4>Why it's helpful</h4>
+          <ul>
+            <li>Fewer chunks → smaller config-server metadata footprint.</li>
+            <li>Faster chunk-map lookups in <code>mongos</code> routing.</li>
+            <li>Quicker balancer passes with fewer candidates to evaluate.</li>
+            <li>Cleans up fragmentation from manual splits or large deletes.</li>
+          </ul>
+        </div>
+        <div class="bm-explain-card bm-card-lim">
+          <div class="bm-card-icon">⚠</div>
+          <h4>Limitations</h4>
+          <ul>
+            <li>Does <strong>not</strong> move data between shards — that is the balancer's job.</li>
+            <li>Only merges chunks with contiguous ranges on the <strong>same shard</strong>.</li>
+            <li>Requires compatible <strong>zone / tag</strong> assignments.</li>
+            <li>Combined chunk must stay under the configured chunk-size limit.</li>
+            <li>Runs only when the balancer is enabled and within its window.</li>
+            <li>Does <em>not</em> resolve jumbo chunks or bad shard-key design.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="bm-facts">
+        <div class="bm-fact"><span>Moves data between shards:</span><strong class="bm-no">No</strong></div>
+        <div class="bm-fact"><span>Merges occur on:</span><strong>Same shard only</strong></div>
+        <div class="bm-fact"><span>Merge target:</span><strong>${bmSt.targetChunkMB} MB</strong></div>
+        <div class="bm-fact"><span>Check interval:</span><strong>${bmSt.checkIntervalSec}s</strong></div>
+      </div>
+    </div>
+
+    <!-- ===== Controls + Viz ===== -->
+    <div class="bm-automerger-layout">
+      <div class="bm-automerger-controls">
+        <div class="bm-ctrl-card">
+          <div class="bm-ctrl-title">AutoMerger Controls</div>
+
+          <div class="bm-ctrl-row">
+            <span class="tip" data-tooltip="<strong>Target chunk size (MB)</strong><br>Upper bound for a merged chunk. Pairs whose combined size would exceed this are skipped.">Target chunk size (MB)</span>
+            <div class="btn-group" id="bm-target-btns">
+              ${[64, 128, 192].map(v => `<button class="count-btn ${bmSt.targetChunkMB===v?'active':''}" data-bm-target="${v}">${v}</button>`).join('')}
+            </div>
+          </div>
+
+          <div class="bm-ctrl-row">
+            <span class="tip" data-tooltip="<strong>autoMergerIntervalSecs</strong><br>Cadence of AutoMerger passes. Tuned via <code>configureCollectionBalancing</code> at the collection level.">Check interval (sec)</span>
+            <div class="btn-group" id="bm-interval-btns">
+              ${[15, 30, 60].map(v => `<button class="count-btn ${bmSt.checkIntervalSec===v?'active':''}" data-bm-interval="${v}">${v}</button>`).join('')}
+            </div>
+          </div>
+
+          <button class="bal-btn bal-btn-imbalance" id="bm-fragment" data-tooltip="<strong>Inject Fragmentation</strong><br>Adds a run of small adjacent chunks to simulate post-split fragmentation on one shard.">✂ Inject Fragmentation</button>
+          <button class="bal-btn ${bmSt.running?'bal-btn-stop':'bal-btn-run'}" id="bm-run-toggle" data-tooltip="<strong>Start / Stop AutoMerger</strong><br>Runs the merge loop, combining eligible adjacent chunks one per round until no eligible pair remains.">${bmSt.running ? '⏹ Stop AutoMerger' : '▶ Start AutoMerger'}</button>
+          <button class="bal-btn bal-btn-step" id="bm-step" ${bmSt.running||bmSt.animating?'disabled':''} data-tooltip="<strong>Step Once</strong><br>Executes a single merge round — picks the smallest eligible pair and combines it.">⏭ Step Once</button>
+          <button class="bal-btn bal-btn-reset" id="bm-reset" data-tooltip="<strong>Reset</strong><br>Restores the default chunk layout (3 shards, mixed zones, some mergeable and some blocked pairs).">↺ Reset Scenario</button>
+
+          <div class="bm-speed-row">
+            <label>Speed</label>
+            <input type="range" id="bm-speed" min="1" max="5" value="${bmSt.speed}" class="bal-speed-slider">
+            <span id="bm-speed-label">${spLabels[bmSt.speed]}</span>
+          </div>
+        </div>
+
+        <div class="bm-ctrl-card">
+          <div class="bm-ctrl-title">Round Status</div>
+          <div class="am-status-grid">
+            <div><span>Pairs checked</span><strong>${candidates.length}</strong></div>
+            <div><span>Mergeable</span><strong class="ok">${okCount}</strong></div>
+            <div><span>Blocked</span><strong class="blocked">${blocked}</strong></div>
+            <div><span>Merges done</span><strong>${bmSt.merges}</strong></div>
+          </div>
+          <div class="am-next-merge ${next ? '' : 'none'}">
+            ${next
+              ? `Next: ${bmShardName(next.shardIdx)} · ${next.left.min}-${next.left.max} + ${next.right.min}-${next.right.max} → ${next.left.min}-${next.right.max} (${next.combinedMB} MB)`
+              : 'No eligible pair remains under current rules.'}
+          </div>
+        </div>
+      </div>
+
+      <div class="bm-automerger-viz">
+        <div class="am-shard-grid">
+          ${Array.from({ length: bmSt.shardCount }, (_, i) => bmRenderShardHTML(i)).join('')}
+        </div>
+        <div class="am-candidates-wrap">
+          <div class="am-candidates-head">Adjacency checks this round</div>
+          ${bmRenderCandidates(candidates)}
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Log ===== -->
+    <div class="bal-log-section">
+      <div class="bal-log-header">
+        <span>AutoMerger Log</span>
+        <button class="btn-ghost btn-xs" id="bm-clear-log">Clear</button>
+      </div>
+      <div class="bal-log-entries" id="bm-log-entries">${bmRenderLogHTML()}</div>
+    </div>
+  `;
+
+  initBmListeners();
+}
+
+async function bmAnimateMerge(pair) {
+  bmSt.animating = true;
+  const lEl = document.getElementById(`bm-chunk-${pair.left.id}`);
+  const rEl = document.getElementById(`bm-chunk-${pair.right.id}`);
+  if (lEl) lEl.classList.add('am-merging-out');
+  if (rEl) rEl.classList.add('am-merging-out');
+  await sleep(bmSpeedMs() * 0.6);
+
+  bmSt.chunks = bmSt.chunks.filter(c => c.id !== pair.left.id && c.id !== pair.right.id);
+  const merged = bmNewChunk({
+    shardIdx: pair.left.shardIdx,
+    zone:     pair.left.zone,
+    min:      pair.left.min,
+    max:      pair.right.max,
+    sizeMB:   pair.combinedMB,
+  });
+  merged.justMerged = true;
+  bmSt.chunks.push(merged);
+
+  bmRenderAutoMerger();
+  setTimeout(() => {
+    const c = bmSt.chunks.find(x => x.id === merged.id);
+    if (c) c.justMerged = false;
+  }, bmSpeedMs() * 0.8);
+
+  bmSt.animating = false;
+}
+
+async function bmDoStep() {
+  if (bmSt.animating) return false;
+  bmSt.rounds++;
+  const cands = bmFindCandidates();
+  const next  = bmPickNext(cands);
+  if (!next) {
+    bmLog('done', 'No eligible adjacent pair remains. AutoMerger is idle under current thresholds and zone/shard constraints.');
+    bmSt.running = false;
+    bmRenderAutoMerger();
+    return false;
+  }
+  bmLog('merge', `Round ${bmSt.rounds}: merging ${next.left.id} (${next.left.min}-${next.left.max}, ${next.left.sizeMB} MB) + ${next.right.id} (${next.right.min}-${next.right.max}, ${next.right.sizeMB} MB) on <strong>${bmShardName(next.shardIdx)}</strong>.`);
+  bmLog('info',  `↳ Merge is metadata-local (no cross-shard data move). New chunk size: ${next.combinedMB} MB.`);
+  await bmAnimateMerge(next);
+  bmSt.merges++;
+  return true;
+}
+
+async function bmRunLoop() {
+  while (bmSt.running) {
+    const moved = await bmDoStep();
+    if (!moved) break;
+    await sleep(bmSpeedMs() * 0.35);
+  }
+  bmSt.running = false;
+  bmRenderAutoMerger();
+}
+
+function bmInjectFragmentation() {
+  if (bmSt.running || bmSt.animating) return;
+  const shard = 1;
+  const zone  = 'europe';
+  const maxRange = Math.max(...bmSt.chunks.map(c => c.max));
+  const start = Math.max(120, maxRange + 1);
+  const sizes = [11, 13, 12, 10, 15, 12];
+  sizes.forEach((sz, i) => {
+    const min = start + i * 10;
+    const max = min + 9;
+    bmSt.chunks.push(bmNewChunk({ shardIdx: shard, zone, min, max, sizeMB: sz }));
+  });
+  bmLog('warn', `Injected ${sizes.length} tiny contiguous chunks on ${bmShardName(shard)} (${zone}) to simulate post-split fragmentation.`);
+  bmRenderAutoMerger();
+}
+
+function initBmListeners() {
+  document.getElementById('bm-target-btns')?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-bm-target]');
+    if (!btn || bmSt.running) return;
+    bmSt.targetChunkMB = parseInt(btn.dataset.bmTarget, 10);
+    bmLog('info', `Target chunk size updated to ${bmSt.targetChunkMB} MB.`);
+    bmRenderAutoMerger();
+  });
+
+  document.getElementById('bm-interval-btns')?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-bm-interval]');
+    if (!btn || bmSt.running) return;
+    bmSt.checkIntervalSec = parseInt(btn.dataset.bmInterval, 10);
+    bmLog('info', `AutoMerger check interval set to ${bmSt.checkIntervalSec}s (simulation cadence).`);
+    bmRenderAutoMerger();
+  });
+
+  document.getElementById('bm-fragment')?.addEventListener('click', bmInjectFragmentation);
+
+  document.getElementById('bm-run-toggle')?.addEventListener('click', () => {
+    if (bmSt.running) {
+      bmSt.running = false;
+      bmLog('warn', 'AutoMerger stopped manually.');
+      bmRenderAutoMerger();
+      return;
+    }
+    const next = bmPickNext(bmFindCandidates());
+    if (!next) {
+      bmLog('info', 'Nothing to merge at current settings. Try a larger target chunk size or inject fragmentation.');
+      return;
+    }
+    bmSt.running = true;
+    bmLog('info', `AutoMerger started (interval ${bmSt.checkIntervalSec}s simulated cadence).`);
+    bmRenderAutoMerger();
+    bmRunLoop();
+  });
+
+  document.getElementById('bm-step')?.addEventListener('click', async () => {
+    if (bmSt.running) return;
+    const btn = document.getElementById('bm-step');
+    if (btn) btn.disabled = true;
+    await bmDoStep();
+    if (btn) btn.disabled = false;
+  });
+
+  document.getElementById('bm-reset')?.addEventListener('click', () => {
+    bmInitState();
+    bmRenderAutoMerger();
+    bmLog('info', 'AutoMerger scenario reset to defaults.');
+  });
+
+  document.getElementById('bm-speed')?.addEventListener('input', e => {
+    bmSt.speed = parseInt(e.target.value, 10);
+    const labels = ['', 'Slow', 'Medium', 'Normal', 'Fast', 'Instant'];
+    const lbl = document.getElementById('bm-speed-label');
+    if (lbl) lbl.textContent = labels[bmSt.speed] || 'Normal';
+  });
+
+  document.getElementById('bm-clear-log')?.addEventListener('click', () => {
+    bmSt.log = [];
+    const el = document.getElementById('bm-log-entries');
+    if (el) el.innerHTML = '<div class="am-log-empty">Log cleared.</div>';
   });
 }
 
