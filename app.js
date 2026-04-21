@@ -3059,12 +3059,33 @@ function bShowJumboModal() {
         <div class="jumbo-modal-section">
           <h4>Risks of jumbo chunks</h4>
           <ul class="jumbo-modal-list">
-            <li><span class="risk-badge risk-high">High</span><strong>Balancer skips them by default.</strong> Chunks flagged <code>jumbo: true</code> are skipped during normal balancing. Data skew on the hot shard is not resolved automatically unless <code>attemptToBalanceJumboChunks</code> is enabled or <code>forceJumbo</code> is used.</li>
+            <li><span class="risk-badge risk-high">High</span><strong>Balancer skips them by default.</strong> Chunks flagged <code>jumbo: true</code> are skipped during normal balancing, so data skew on the hot shard is not resolved automatically.</li>
             <li><span class="risk-badge risk-high">High</span><strong>Persistent hot shard.</strong> Writes continue routing to the same shard indefinitely, compounding CPU, memory, and I/O pressure on that node.</li>
             <li><span class="risk-badge risk-med">Medium</span><strong>Replication lag.</strong> A single overloaded primary shard can slow oplog application on secondaries, increasing replication lag cluster-wide.</li>
             <li><span class="risk-badge risk-med">Medium</span><strong>Difficult to resolve at scale.</strong> Clearing the jumbo flag (<code>sh.clearJumboFlag()</code>) only works once the underlying data distribution or shard key is improved.</li>
             <li><span class="risk-badge risk-low">Low</span><strong>Metadata bloat.</strong> Jumbo chunks are tracked indefinitely in the config server, adding noise to chunk-map queries and balancer decisions.</li>
           </ul>
+        </div>
+        <div class="jumbo-modal-section">
+          <h4>Overriding the skip behavior</h4>
+          <p>MongoDB exposes two escape hatches that tell the balancer to migrate jumbo chunks anyway. Use them carefully — they move the chunk but do <em>not</em> fix the underlying low-cardinality key.</p>
+          <table class="jumbo-modal-table">
+            <thead>
+              <tr><th>Option</th><th>Scope</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>attemptToBalanceJumboChunks</code></td>
+                <td>Balancer setting (cluster-wide)</td>
+                <td>Tells the balancer to include jumbo chunks in its migration candidate set instead of skipping them.</td>
+              </tr>
+              <tr>
+                <td><code>forceJumbo</code></td>
+                <td>Per-migration flag on <code>moveChunk</code> / <code>moveRange</code></td>
+                <td>Overrides the size limit on a single manual migration so an oversized jumbo chunk can move once.</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div class="jumbo-modal-section">
           <h4>Remediation path</h4>
