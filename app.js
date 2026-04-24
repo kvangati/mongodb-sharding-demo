@@ -2790,12 +2790,13 @@ function renderBalancer() {
       </div>
       <div class="jumbo-content">
         <div class="jumbo-explanation">
-          <p>A <span class="tip" data-tooltip="<strong>Jumbo Chunk</strong><br>A chunk that has grown beyond <code>chunkSize</code> (default 128 MB) and cannot be split because every document inside shares the same shard key value. MongoDB sets the <code>jumbo</code> flag in the config server and the balancer permanently skips it."><strong>jumbo chunk</strong></span>
-          has grown beyond <code>chunkSize</code> (default 128 MB) and
+          <p>A <span class="tip" data-tooltip="<strong>Jumbo Chunk</strong><br>A chunk that has grown beyond <code>chunkSize</code> (128 MB default on MongoDB 6.0+, 64 MB on earlier versions) <em>and</em> cannot be split because every document inside shares the same shard key value. MongoDB sets the <code>jumbo</code> flag in the config server and the balancer skips that specific chunk — large-but-splittable chunks are still migrated normally."><strong>jumbo chunk</strong></span>
+          has grown beyond <code>chunkSize</code> (128 MB default on MongoDB 6.0+, 64 MB on earlier versions) and
           <em>cannot be split</em> — because every document inside shares the same
           <span class="tip" data-tooltip="<strong>Shard Key Value</strong><br>The specific value of the field used to partition data. If many documents share an identical shard key value (e.g. status='pending'), they all land in the same chunk, which grows without bound.">shard key value</span>.
-          MongoDB marks it with the <code>jumbo</code> flag and the balancer skips it by default, so it
-          accumulates on one shard.</p>
+          MongoDB marks <em>that specific chunk</em> with the <code>jumbo</code> flag and the balancer skips it by default, so it
+          accumulates on one shard. Large chunks that are <em>not</em> flagged jumbo are still migrated normally —
+          only the <code>jumbo: true</code> flag blocks a move.</p>
           <div class="jumbo-facts">
             <div class="jumbo-fact jumbo-fact-red">
               <strong>Problem:</strong> The balancer skips jumbo chunks by default.
@@ -3048,7 +3049,7 @@ function bShowJumboModal() {
       <div class="jumbo-modal-body">
         <div class="jumbo-modal-section">
           <h4>How jumbo chunks are created</h4>
-          <p>A chunk becomes <strong>jumbo</strong> when it grows beyond the configured <code>chunkSize</code> (default 128 MB) and MongoDB cannot split it. This happens when every document in the chunk shares the <strong>same shard key value</strong> — for example, all documents with <code>status: &quot;pending&quot;</code> must live in the same chunk, and that chunk cannot be halved because there is no boundary to split on.</p>
+          <p>A chunk becomes <strong>jumbo</strong> when it grows beyond the configured <code>chunkSize</code> (128 MB default on MongoDB 6.0+, 64 MB on earlier versions) <em>and</em> MongoDB cannot split it. Size alone is not enough — large-but-splittable chunks are still migrated normally. A chunk is only flagged <code>jumbo</code> (and therefore skipped) when every document in it shares the <strong>same shard key value</strong>, leaving no split point. For example, all documents with <code>status: &quot;pending&quot;</code> must live in the same chunk, and that chunk cannot be halved because there is no boundary to split on.</p>
           <div class="jumbo-modal-code">
             // Example: low-cardinality key causes jumbo chunks<br>
             sh.shardCollection(&quot;mydb.orders&quot;, { status: 1 })<br><br>
