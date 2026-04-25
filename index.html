@@ -18,6 +18,7 @@
       </div>
       <h1>MongoDB Sharding <span class="highlight">Demo</span></h1>
       <span class="version-badge">Interactive Simulator</span>
+      <button class="btn-secondary" id="btn-report-bug">Report a Bug</button>
     </div>
     <div class="header-right">
       <span class="header-stat" id="header-docs">0 docs</span>
@@ -25,6 +26,46 @@
       <button class="btn-secondary" id="btn-reset-all">Reset All</button>
     </div>
   </header>
+
+  <!-- Bug Report Modal -->
+  <div class="jumbo-modal-overlay bug-modal-overlay" id="bug-modal" style="display:none;">
+    <div class="jumbo-modal bug-modal">
+      <div class="jumbo-modal-header">
+        <span class="jumbo-modal-icon">🐞</span>
+        <h3>Report a Bug</h3>
+        <button class="jumbo-modal-close" id="bug-modal-close" aria-label="Close">×</button>
+      </div>
+      <form class="jumbo-modal-body bug-form" id="bug-form" novalidate>
+        <div class="bug-form-row">
+          <label class="bug-field">
+            <span>First name</span>
+            <input type="text" name="firstName" id="bug-first" required>
+          </label>
+          <label class="bug-field">
+            <span>Last name</span>
+            <input type="text" name="lastName" id="bug-last" required>
+          </label>
+        </div>
+        <label class="bug-field">
+          <span>Title</span>
+          <input type="text" name="title" id="bug-title" placeholder="Short summary of the issue" required>
+        </label>
+        <label class="bug-field">
+          <span>Email</span>
+          <input type="email" name="email" id="bug-email" placeholder="you@example.com" required>
+        </label>
+        <label class="bug-field">
+          <span>Description</span>
+          <textarea name="description" id="bug-desc" rows="6" placeholder="What happened? What did you expect? Steps to reproduce…" required></textarea>
+        </label>
+        <div class="bug-form-note">Submitting opens your email client with the report addressed to the maintainers.</div>
+        <div class="bug-form-actions">
+          <button type="button" class="btn-secondary" id="bug-cancel">Cancel</button>
+          <button type="submit" class="btn-primary" id="bug-submit">Send Report</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <div class="app-layout">
     <!-- ===== CONFIG SIDEBAR ===== -->
@@ -376,6 +417,13 @@
       </div>
     </main>
   </div>
+
+  <footer class="app-credit" aria-label="Authors">
+    Created by
+    <a class="app-credit-name" href="https://www.linkedin.com/in/karthik-vangati-623b1a92/" target="_blank" rel="noopener noreferrer" title="Karthik Vangati on LinkedIn">Karthik Vangati</a>
+    &amp;
+    <a class="app-credit-name" href="https://www.linkedin.com/in/sahib-chandnani-187118121/" target="_blank" rel="noopener noreferrer" title="Sahib Chandnani on LinkedIn">Sahib Chandnani</a>
+  </footer>
 
   <script src="app.js"></script>
 </body>

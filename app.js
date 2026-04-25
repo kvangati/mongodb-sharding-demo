@@ -1174,7 +1174,45 @@ function renderDistribution() {
         Switch to <code style="font-family:monospace;">customer_id</code> or <code style="font-family:monospace;">order_date</code> for balanced distribution.
       </div>
     ` : ''}
+
+    <!-- Shard-key analyzer -->
+    <div class="ska-section">
+      <div class="ska-header">
+        <div>
+          <div class="ska-title">Shard-Key Analyzer</div>
+          <div class="ska-subtitle">Paste or upload a sample document (or an array of documents) and we will recommend a shard key with reasoning.</div>
+        </div>
+      </div>
+      <div class="ska-input-row">
+        <label class="ska-file-btn" for="ska-file-input">
+          <span class="ska-file-ico">📁</span> Upload JSON
+          <input type="file" id="ska-file-input" accept=".json,application/json" hidden>
+        </label>
+        <button class="ska-clear-btn" id="ska-clear-btn" type="button">Clear</button>
+      </div>
+      <div class="ska-presets">
+        <div class="ska-presets-label">No document handy? Try a sample workload:</div>
+        <div class="ska-presets-row">
+          ${SKA_PRESETS.map(p => `
+            <button class="ska-preset-chip" data-preset="${p.id}" type="button" title="${p.headline}">
+              <span class="ska-preset-name">${p.label}</span>
+              <span class="ska-preset-key">→ ${skaCompoundCode(p.bestKey)}</span>
+            </button>
+          `).join('')}
+        </div>
+        <div class="ska-preset-hint" id="ska-preset-hint" hidden></div>
+        <div class="ska-compound-visual" id="ska-compound-visual" hidden></div>
+      </div>
+      <textarea id="ska-textarea" class="ska-textarea" spellcheck="false" placeholder='Paste a JSON document, e.g.&#10;{&#10;  "_id": "...",&#10;  "user_id": "...",&#10;  "country": "US",&#10;  "created_at": "2024-01-15T10:30:00Z",&#10;  "amount": 42.5&#10;}&#10;&#10;or an array of documents for better cardinality estimates.'></textarea>
+      <div class="ska-actions">
+        <button class="ska-analyze-btn" id="ska-analyze-btn" type="button">Analyze &amp; Recommend</button>
+        <span class="ska-status" id="ska-status"></span>
+      </div>
+      <div class="ska-results" id="ska-results"></div>
+    </div>
   `;
+
+  initShardKeyAnalyzer();
 }
 
 function buildChunkMap(shards) {
@@ -1207,6 +1245,484 @@ function buildChunkMap(shards) {
       <div class="chunk-legend">${legend}</div>
     </div>
   `;
+}
+
+// ===== SHARD-KEY ANALYZER =====
+
+const SKA_PRESETS = [
+  {
+    id: 'user-events',
+    label: 'User events',
+    headline: 'Per-user app events',
+    bestKey: 'user_id',
+    bestStrategy: 'hashed',
+    why: 'Each user generates many events, and almost every read is "give me events for this user." High cardinality on <code>user_id</code> means the balancer can split freely; hashing it gives uniform write distribution and equality lookups still hit a single shard.',
+    docs: [
+      { _id: '67a1b2c3d4e5f6a7b8c9d001', user_id: 'u_8421', event: 'login',       page: '/dashboard', ts: '2026-04-20T10:30:00Z', session_id: 's_19283', latency_ms: 42 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d002', user_id: 'u_3092', event: 'click',       page: '/pricing',   ts: '2026-04-20T10:30:14Z', session_id: 's_88102', latency_ms: 18 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d003', user_id: 'u_7714', event: 'view',        page: '/blog/12',   ts: '2026-04-20T10:30:48Z', session_id: 's_44210', latency_ms: 91 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d004', user_id: 'u_5520', event: 'signup',      page: '/signup',    ts: '2026-04-20T10:31:02Z', session_id: 's_60012', latency_ms: 235 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d005', user_id: 'u_8421', event: 'click',       page: '/billing',   ts: '2026-04-20T10:31:30Z', session_id: 's_19283', latency_ms: 22 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d006', user_id: 'u_9930', event: 'view',        page: '/home',      ts: '2026-04-20T10:31:55Z', session_id: 's_77410', latency_ms: 64 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d007', user_id: 'u_2241', event: 'click',       page: '/docs',      ts: '2026-04-20T10:32:11Z', session_id: 's_30198', latency_ms: 31 },
+      { _id: '67a1b2c3d4e5f6a7b8c9d008', user_id: 'u_4408', event: 'logout',      page: '/account',   ts: '2026-04-20T10:32:42Z', session_id: 's_55501', latency_ms: 12 }
+    ]
+  },
+  {
+    id: 'multi-tenant',
+    label: 'Multi-tenant SaaS',
+    headline: 'Per-tenant workspace records',
+    bestKey: '{ tenant_id: 1, user_id: 1 }',
+    bestStrategy: 'compound (zone + range)',
+    why: 'Each tenant\'s data should stay co-located for query efficiency, but <code>tenant_id</code> alone has low cardinality and would create jumbo chunks for big tenants. Pairing it with <code>user_id</code> gives MongoDB a high-cardinality suffix it can split on inside each tenant.',
+    docs: [
+      { _id: 'doc_a01', tenant_id: 'acme',       user_id: 'u_1001', role: 'admin',  workspace: 'main',     created_at: '2026-04-19T08:11:00Z', plan: 'enterprise' },
+      { _id: 'doc_a02', tenant_id: 'acme',       user_id: 'u_1002', role: 'member', workspace: 'main',     created_at: '2026-04-19T08:14:22Z', plan: 'enterprise' },
+      { _id: 'doc_a03', tenant_id: 'acme',       user_id: 'u_1003', role: 'member', workspace: 'eng',      created_at: '2026-04-19T09:02:10Z', plan: 'enterprise' },
+      { _id: 'doc_b01', tenant_id: 'globex',     user_id: 'u_2001', role: 'admin',  workspace: 'main',     created_at: '2026-04-19T10:30:00Z', plan: 'pro' },
+      { _id: 'doc_b02', tenant_id: 'globex',     user_id: 'u_2002', role: 'member', workspace: 'main',     created_at: '2026-04-19T10:45:11Z', plan: 'pro' },
+      { _id: 'doc_c01', tenant_id: 'initech',    user_id: 'u_3001', role: 'owner',  workspace: 'finance',  created_at: '2026-04-20T11:00:05Z', plan: 'starter' },
+      { _id: 'doc_c02', tenant_id: 'initech',    user_id: 'u_3002', role: 'member', workspace: 'finance',  created_at: '2026-04-20T11:02:50Z', plan: 'starter' },
+      { _id: 'doc_d01', tenant_id: 'umbrella',   user_id: 'u_4001', role: 'admin',  workspace: 'research', created_at: '2026-04-20T12:08:33Z', plan: 'enterprise' }
+    ]
+  },
+  {
+    id: 'geo-ecommerce',
+    label: 'Geo e-commerce',
+    headline: 'Orders with regional residency',
+    bestKey: '{ country: 1, customer_id: 1 }',
+    bestStrategy: 'compound (zone)',
+    why: '<code>country</code> drives residency (GDPR, regional data laws), so it has to be in the key. But country alone is low-cardinality, so combine it with <code>customer_id</code> to keep each country zone splittable across multiple shards.',
+    docs: [
+      { order_id: 'o_7001', customer_id: 'c_55012', country: 'US', region: 'na', amount: 142.50, currency: 'USD', placed_at: '2026-04-22T14:11:00Z', status: 'paid' },
+      { order_id: 'o_7002', customer_id: 'c_88210', country: 'DE', region: 'eu', amount: 64.00,  currency: 'EUR', placed_at: '2026-04-22T14:12:18Z', status: 'paid' },
+      { order_id: 'o_7003', customer_id: 'c_44091', country: 'FR', region: 'eu', amount: 219.95, currency: 'EUR', placed_at: '2026-04-22T14:13:05Z', status: 'pending' },
+      { order_id: 'o_7004', customer_id: 'c_31204', country: 'JP', region: 'apac', amount: 18500, currency: 'JPY', placed_at: '2026-04-22T14:13:42Z', status: 'paid' },
+      { order_id: 'o_7005', customer_id: 'c_55012', country: 'US', region: 'na', amount: 312.00, currency: 'USD', placed_at: '2026-04-22T14:14:11Z', status: 'paid' },
+      { order_id: 'o_7006', customer_id: 'c_77119', country: 'BR', region: 'latam', amount: 89.40, currency: 'BRL', placed_at: '2026-04-22T14:15:00Z', status: 'paid' },
+      { order_id: 'o_7007', customer_id: 'c_60040', country: 'GB', region: 'eu', amount: 47.20,  currency: 'GBP', placed_at: '2026-04-22T14:15:38Z', status: 'cancelled' },
+      { order_id: 'o_7008', customer_id: 'c_22014', country: 'AU', region: 'apac', amount: 220.00, currency: 'AUD', placed_at: '2026-04-22T14:16:02Z', status: 'paid' }
+    ]
+  },
+  {
+    id: 'iot-telemetry',
+    label: 'IoT telemetry',
+    headline: 'Device sensor readings over time',
+    bestKey: 'device_id',
+    bestStrategy: 'hashed',
+    why: 'Time-series workloads are tempting to shard on the timestamp, but every new write would land on the highest-range chunk — a classic monotonic hotspot. Hashing <code>device_id</code> spreads ingest evenly while keeping per-device queries on a single shard.',
+    docs: [
+      { device_id: 'dev_a001', metric: 'temp_c', value: 22.4, ts: '2026-04-23T00:00:00Z', firmware: '2.4.1', site: 'plant-a' },
+      { device_id: 'dev_a002', metric: 'temp_c', value: 21.9, ts: '2026-04-23T00:00:00Z', firmware: '2.4.1', site: 'plant-a' },
+      { device_id: 'dev_b101', metric: 'humidity', value: 47.3, ts: '2026-04-23T00:00:01Z', firmware: '2.4.0', site: 'plant-b' },
+      { device_id: 'dev_c220', metric: 'pressure', value: 101.4, ts: '2026-04-23T00:00:02Z', firmware: '2.3.9', site: 'plant-c' },
+      { device_id: 'dev_a001', metric: 'temp_c', value: 22.5, ts: '2026-04-23T00:00:05Z', firmware: '2.4.1', site: 'plant-a' },
+      { device_id: 'dev_d017', metric: 'voltage', value: 12.05, ts: '2026-04-23T00:00:06Z', firmware: '2.4.1', site: 'plant-d' },
+      { device_id: 'dev_b101', metric: 'humidity', value: 47.5, ts: '2026-04-23T00:00:11Z', firmware: '2.4.0', site: 'plant-b' },
+      { device_id: 'dev_e441', metric: 'temp_c', value: 19.8, ts: '2026-04-23T00:00:14Z', firmware: '2.4.1', site: 'plant-e' }
+    ]
+  },
+  {
+    id: 'monotonic-trap',
+    label: 'Anti-pattern: monotonic id',
+    headline: 'Sequential order_id (hotspot demo)',
+    bestKey: 'customer_id',
+    bestStrategy: 'hashed',
+    why: 'A monotonically increasing <code>order_id</code> looks high-cardinality but routes every new write to the last chunk — the entire ingest hotspots one shard. <code>customer_id</code> has comparable cardinality without the monotonic write pattern.',
+    docs: [
+      { order_id: 10001, customer_id: 'c_8421', amount: 42.00,  status: 'paid',    placed_at: '2026-04-23T09:00:00Z' },
+      { order_id: 10002, customer_id: 'c_3092', amount: 180.50, status: 'paid',    placed_at: '2026-04-23T09:00:02Z' },
+      { order_id: 10003, customer_id: 'c_7714', amount: 19.95,  status: 'paid',    placed_at: '2026-04-23T09:00:04Z' },
+      { order_id: 10004, customer_id: 'c_5520', amount: 312.00, status: 'pending', placed_at: '2026-04-23T09:00:05Z' },
+      { order_id: 10005, customer_id: 'c_8421', amount: 64.10,  status: 'paid',    placed_at: '2026-04-23T09:00:07Z' },
+      { order_id: 10006, customer_id: 'c_9930', amount: 220.00, status: 'paid',    placed_at: '2026-04-23T09:00:09Z' },
+      { order_id: 10007, customer_id: 'c_2241', amount: 14.40,  status: 'paid',    placed_at: '2026-04-23T09:00:11Z' },
+      { order_id: 10008, customer_id: 'c_4408', amount: 88.00,  status: 'cancelled', placed_at: '2026-04-23T09:00:13Z' }
+    ]
+  }
+];
+
+const SKA_MONOTONIC_HINTS = ['_id', 'id', 'created_at', 'createdat', 'created', 'timestamp', 'ts', 'date', 'time', 'updated_at', 'updatedat', 'order_id', 'orderid', 'sequence', 'seq'];
+const SKA_ROUTING_HINTS   = ['country', 'region', 'tenant', 'tenant_id', 'org', 'org_id', 'organization', 'workspace', 'company', 'account', 'zone', 'locale'];
+const SKA_ENUM_HINTS      = ['status', 'state', 'type', 'kind', 'category', 'tier', 'role', 'plan', 'priority', 'severity', 'level'];
+const SKA_HIGH_CARD_HINTS = ['user_id', 'userid', 'customer_id', 'customerid', 'session_id', 'request_id', 'uuid', 'guid', 'email', 'username', 'device_id'];
+
+function skaIsObjectIdLike(v) {
+  return typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v);
+}
+function skaIsIsoDate(v) {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(v);
+}
+function skaTypeOf(v) {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  if (typeof v === 'object') return 'object';
+  if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'number';
+  if (typeof v === 'boolean') return 'bool';
+  if (skaIsObjectIdLike(v)) return 'objectid';
+  if (skaIsIsoDate(v)) return 'date';
+  return 'string';
+}
+
+function skaCollectFields(docs) {
+  // Returns map: fieldName -> { types: Set, samples: [v...], distinct: Set, count }
+  const fields = new Map();
+  docs.forEach(d => {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return;
+    Object.keys(d).forEach(k => {
+      const entry = fields.get(k) || { types: new Set(), samples: [], distinct: new Set(), count: 0 };
+      const v = d[k];
+      entry.types.add(skaTypeOf(v));
+      if (entry.samples.length < 6) entry.samples.push(v);
+      if (typeof v !== 'object' || v === null) {
+        entry.distinct.add(typeof v === 'string' ? v : String(v));
+      }
+      entry.count += 1;
+      fields.set(k, entry);
+    });
+  });
+  return fields;
+}
+
+function skaScoreField(name, info, totalDocs) {
+  const lower = name.toLowerCase();
+  const types = [...info.types];
+  const primaryType = types[0];
+  const distinctCount = info.distinct.size;
+  const cardinalityRatio = totalDocs > 0 ? distinctCount / totalDocs : 0;
+
+  const isMonotonicName = SKA_MONOTONIC_HINTS.includes(lower);
+  const isRoutingName   = SKA_ROUTING_HINTS.some(h => lower === h || lower.endsWith('_' + h) || lower === h);
+  const isEnumName      = SKA_ENUM_HINTS.includes(lower);
+  const isHighCardName  = SKA_HIGH_CARD_HINTS.some(h => lower === h || lower.endsWith('_' + h));
+  const isObjectIdType  = primaryType === 'objectid' || lower === '_id';
+  const isDateType      = primaryType === 'date';
+  const isObjectType    = primaryType === 'object' || primaryType === 'array';
+  const isBoolType      = primaryType === 'bool';
+  const isNullableMixed = types.length > 1 || info.types.has('null');
+
+  // Cardinality bucket — use observed ratio when we have enough docs, otherwise fall back to name hints.
+  let cardinality;
+  if (totalDocs >= 5) {
+    if (cardinalityRatio >= 0.9) cardinality = 'high';
+    else if (cardinalityRatio >= 0.4) cardinality = 'medium';
+    else cardinality = 'low';
+  } else {
+    if (isHighCardName || isObjectIdType || isDateType) cardinality = 'high';
+    else if (isRoutingName) cardinality = 'medium';
+    else if (isEnumName || isBoolType) cardinality = 'low';
+    else cardinality = 'unknown';
+  }
+
+  // Reasons + score
+  const reasons = [];
+  let score = 50;
+  let strategy = 'hashed';
+  let verdict = 'ok';
+
+  if (isObjectType) {
+    score = 0; verdict = 'avoid'; strategy = 'n/a';
+    reasons.push('Object/array fields cannot be shard keys directly — MongoDB requires a scalar value (or a compound of scalars).');
+  } else if (isBoolType) {
+    score = 5; verdict = 'avoid'; strategy = 'n/a';
+    reasons.push('Booleans have only 2 distinct values → at most 2 chunks possible, severe hotspotting.');
+  } else if (cardinality === 'low') {
+    score = 15; verdict = 'avoid'; strategy = 'n/a';
+    reasons.push(`Low cardinality (${distinctCount} distinct values across ${totalDocs} samples) caps the number of chunks and produces unsplittable jumbo chunks.`);
+    if (isEnumName) reasons.push('Field name suggests an enum/status — expect skewed value frequency too.');
+  } else if (isMonotonicName || isObjectIdType || isDateType) {
+    score = 55; verdict = 'caution'; strategy = 'hashed';
+    reasons.push('Monotonically increasing values (timestamps, ObjectId, sequence ids) hotspot the highest-range chunk under range sharding.');
+    reasons.push('Hashing the field neutralizes the hotspot while keeping equality lookups single-shard — but range queries on the original key fan out.');
+  } else if (isRoutingName) {
+    score = 80; verdict = 'good'; strategy = 'zone';
+    reasons.push('Field name signals a tenant/locality dimension — strong candidate for zone-aware sharding (data residency, geo-locality).');
+    reasons.push('On its own the cardinality may be low, so combine with a high-cardinality suffix (e.g. `{ ' + name + ': 1, user_id: 1 }`) to keep chunks splittable.');
+    if (cardinality === 'low') score -= 15;
+  } else if (cardinality === 'high' || isHighCardName) {
+    score = 88; verdict = 'great'; strategy = 'hashed';
+    reasons.push(`High cardinality (${cardinality === 'high' ? `${distinctCount}/${totalDocs} distinct` : 'name suggests per-entity id'}) means the balancer can split freely and the load distributes evenly.`);
+    reasons.push('Hashed sharding gives uniform write distribution; ranged sharding works too if range queries on this field are common.');
+  } else if (cardinality === 'medium') {
+    score = 65; verdict = 'ok'; strategy = 'hashed';
+    reasons.push(`Medium cardinality (${distinctCount}/${totalDocs} distinct) is workable but may produce uneven chunk sizes; verify against a larger sample.`);
+  } else {
+    score = 50; verdict = 'ok'; strategy = 'hashed';
+    reasons.push('Cardinality cannot be estimated from the sample provided — upload more documents (an array) for a stronger recommendation.');
+  }
+
+  if (isNullableMixed) {
+    score -= 10;
+    reasons.push('Mixed/nullable types observed across samples — shard keys must be present and consistent for every document.');
+  }
+
+  return {
+    name,
+    primaryType,
+    types,
+    distinctCount,
+    cardinality,
+    cardinalityRatio,
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    strategy,
+    verdict,
+    reasons
+  };
+}
+
+function skaAnalyze(docsInput) {
+  const docs = Array.isArray(docsInput) ? docsInput.filter(d => d && typeof d === 'object') : [docsInput];
+  if (!docs.length) {
+    return { error: 'No usable documents found. Provide a JSON object or an array of objects.' };
+  }
+  const fields = skaCollectFields(docs);
+  if (!fields.size) {
+    return { error: 'No top-level fields detected. Make sure the JSON is an object (or array of objects).' };
+  }
+  const candidates = [...fields.entries()].map(([name, info]) => skaScoreField(name, info, docs.length))
+    .sort((a, b) => b.score - a.score);
+
+  const winner = candidates[0];
+
+  // Compound suggestion — pair a routing/locality field with a high-cardinality one if both exist.
+  const routing = candidates.find(c => SKA_ROUTING_HINTS.some(h => c.name.toLowerCase() === h || c.name.toLowerCase().endsWith('_' + h)));
+  const highCard = candidates.find(c => c.cardinality === 'high' && c.primaryType !== 'object' && c.primaryType !== 'array' && c.primaryType !== 'bool');
+  let compound = null;
+  if (routing && highCard && routing.name !== highCard.name) {
+    compound = { fields: [routing.name, highCard.name], strategy: 'zone + range', reason: `Pair the locality field <code>${routing.name}</code> with the high-cardinality field <code>${highCard.name}</code> so chunks remain splittable inside each zone and writes spread across shards.` };
+  }
+
+  return { docs: docs.length, candidates, winner, compound };
+}
+
+function skaVerdictBadge(v) {
+  const map = {
+    great:   { cls: 'ska-badge-great',   text: 'Great' },
+    good:    { cls: 'ska-badge-good',    text: 'Good' },
+    ok:      { cls: 'ska-badge-ok',      text: 'OK' },
+    caution: { cls: 'ska-badge-caution', text: 'Caution' },
+    avoid:   { cls: 'ska-badge-avoid',   text: 'Avoid' }
+  };
+  const m = map[v] || map.ok;
+  return `<span class="ska-badge ${m.cls}">${m.text}</span>`;
+}
+
+function skaRenderResults(result) {
+  if (result.error) {
+    return `<div class="ska-error">⚠ ${result.error}</div>`;
+  }
+  const w = result.winner;
+  const winnerCard = `
+    <div class="ska-winner">
+      <div class="ska-winner-head">
+        <div class="ska-winner-label">Recommended shard key</div>
+        ${skaVerdictBadge(w.verdict)}
+      </div>
+      <div class="ska-winner-key"><code>${w.name}</code></div>
+      <div class="ska-winner-meta">
+        <span>Strategy: <strong>${w.strategy}</strong></span>
+        <span>Type: <strong>${w.primaryType}</strong></span>
+        <span>Cardinality: <strong>${w.cardinality}</strong>${w.cardinalityRatio ? ` (${w.distinctCount}/${result.docs})` : ''}</span>
+        <span>Score: <strong>${w.score}</strong>/100</span>
+      </div>
+      <ul class="ska-reasons">
+        ${w.reasons.map(r => `<li>${r}</li>`).join('')}
+      </ul>
+      ${result.compound ? `
+        <div class="ska-compound">
+          <strong>Compound alternative:</strong> ${skaCompoundCode(`{ ${result.compound.fields.map(f => `${f}: 1`).join(', ')} }`)}
+          <div class="ska-compound-reason">${result.compound.reason}</div>
+        </div>` : ''}
+    </div>
+  `;
+
+  const others = result.candidates.slice(1).map(c => `
+    <div class="ska-cand">
+      <div class="ska-cand-head">
+        <code class="ska-cand-name">${c.name}</code>
+        ${skaVerdictBadge(c.verdict)}
+        <span class="ska-cand-score">${c.score}/100</span>
+      </div>
+      <div class="ska-cand-meta">${c.primaryType} · cardinality ${c.cardinality}${c.cardinalityRatio ? ` (${c.distinctCount}/${result.docs})` : ''} · suggests ${c.strategy}</div>
+      <ul class="ska-cand-reasons">${c.reasons.map(r => `<li>${r}</li>`).join('')}</ul>
+    </div>
+  `).join('');
+
+  return `
+    ${winnerCard}
+    <div class="ska-others-title">Other fields scored</div>
+    <div class="ska-others">${others}</div>
+    <div class="ska-footnote">Heuristic only — based on ${result.docs} sample document${result.docs === 1 ? '' : 's'}. Validate against representative production data and your query patterns before committing to a shard key.</div>
+  `;
+}
+
+const SKA_COMPOUND_TOOLTIP = "<strong>Compound Shard Key</strong><br>A shard key made of two or more fields, written as <code>{ fieldA: 1, fieldB: 1 }</code>. The <em>leftmost</em> field is the prefix — it determines which chunk (and therefore which shard or zone) a document lives in. The remaining fields add cardinality so big prefix buckets can be split.<br><br><strong>Routing:</strong> queries that include the prefix can be targeted to a single shard; queries on a suffix field alone must scatter-gather to every shard.<br><br><strong>Why use it:</strong> when one field alone is too low-cardinality (tenant_id, country, status) to be a safe shard key, pair it with a high-cardinality suffix to keep chunks splittable while preserving locality.";
+
+const SKA_SINGLE_TOOLTIP = "<strong>Shard Key</strong><br>The field MongoDB uses to partition a collection's documents into chunks across shards. Every document must contain the shard key, and once chosen it's expensive to change (requires <code>reshardCollection</code>).<br><br><strong>What makes a good single-field key:</strong> high cardinality (lots of distinct values so chunks can split), even write distribution (no monotonic hotspot like a timestamp), and frequent equality lookups on this field (so most queries can be routed to a single shard).<br><br><strong>Strategies:</strong> ranged keeps natural ordering for range queries; hashed scrambles values so writes spread evenly across shards but range queries fan out.";
+
+function skaCompoundCode(text) {
+  const isCompound = typeof text === 'string' && text.includes('{') && text.includes(',');
+  const tip = isCompound ? SKA_COMPOUND_TOOLTIP : SKA_SINGLE_TOOLTIP;
+  const cls = isCompound ? 'tip ska-compound-code' : 'tip ska-single-code';
+  return `<code class="${cls}" data-tooltip="${tip.replace(/"/g, '&quot;')}">${text}</code>`;
+}
+
+function skaParseCompoundKey(bestKey) {
+  if (!bestKey || !bestKey.includes('{')) return null;
+  const m = bestKey.match(/\{\s*([^}]+)\s*\}/);
+  if (!m) return null;
+  const fields = m[1].split(',').map(s => s.trim().split(':')[0].trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+  return fields.length >= 2 ? fields : null;
+}
+
+function skaRenderCompoundVisual(preset) {
+  const fields = skaParseCompoundKey(preset.bestKey);
+  if (!fields) return '';
+  const [prefix, suffix] = fields;
+  const docs = preset.docs.filter(d => d && typeof d === 'object' && d[prefix] != null);
+
+  // Group docs by prefix value, capture suffix values per group
+  const buckets = new Map();
+  docs.forEach(d => {
+    const k = String(d[prefix]);
+    if (!buckets.has(k)) buckets.set(k, []);
+    const arr = buckets.get(k);
+    const sv = d[suffix];
+    if (sv != null && !arr.includes(sv)) arr.push(sv);
+  });
+
+  // Show only the first two example buckets — keeps the visual focused
+  const SHARDS = ['rs0', 'rs1'];
+  const shown = [...buckets.entries()].slice(0, 2);
+  const totalBuckets = buckets.size;
+  const bucketHTML = shown.map(([pv, suffixes], i) => {
+    const shard = SHARDS[i % SHARDS.length];
+    const suffixPills = suffixes.slice(0, 4).map(s => `<span class="skacv-leaf">${s}</span>`).join('');
+    const more = suffixes.length > 4 ? `<span class="skacv-leaf skacv-leaf-more">+${suffixes.length - 4}</span>` : '';
+    return `
+      <div class="skacv-bucket">
+        <div class="skacv-bucket-head">
+          <span class="skacv-bucket-tag">${prefix}</span>
+          <span class="skacv-bucket-val">${pv}</span>
+          <span class="skacv-bucket-arrow">→</span>
+          <span class="skacv-shard">${shard}</span>
+        </div>
+        <div class="skacv-leaves" title="${suffix} values inside this ${prefix} bucket">
+          <span class="skacv-leaf-label">${suffix}:</span>
+          ${suffixPills}${more}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="skacv-head">
+      <div class="skacv-title">How a compound shard key works</div>
+      <div class="skacv-key">${skaCompoundCode(`{ ${prefix}: 1, ${suffix}: 1 }`)}</div>
+    </div>
+    <div class="skacv-roles">
+      <div class="skacv-role skacv-role-prefix">
+        <div class="skacv-role-name">${prefix}</div>
+        <div class="skacv-role-tag">prefix</div>
+        <div class="skacv-role-desc">Routes the chunk to a shard / zone</div>
+      </div>
+      <div class="skacv-plus">+</div>
+      <div class="skacv-role skacv-role-suffix">
+        <div class="skacv-role-name">${suffix}</div>
+        <div class="skacv-role-tag">suffix</div>
+        <div class="skacv-role-desc">Provides cardinality so chunks remain splittable</div>
+      </div>
+    </div>
+    <div class="skacv-buckets">${bucketHTML}</div>
+    ${totalBuckets > shown.length ? `<div class="skacv-buckets-more">+ ${totalBuckets - shown.length} more ${prefix} bucket${totalBuckets - shown.length === 1 ? '' : 's'} in the sample (omitted for clarity)</div>` : ''}
+    <div class="skacv-routing">
+      <div class="skacv-routing-title">Query routing behavior</div>
+      <ul>
+        <li><span class="skacv-r-good">Targeted</span><code>find({ ${prefix}: … })</code> — mongos uses the prefix to route to one shard.</li>
+        <li><span class="skacv-r-good">Targeted</span><code>find({ ${prefix}: …, ${suffix}: … })</code> — single chunk on a single shard.</li>
+        <li><span class="skacv-r-warn">Scatter-gather</span><code>find({ ${suffix}: … })</code> — no prefix, mongos must broadcast to every shard.</li>
+      </ul>
+    </div>
+  `;
+}
+
+function initShardKeyAnalyzer() {
+  const ta       = document.getElementById('ska-textarea');
+  const fileIn   = document.getElementById('ska-file-input');
+  const clear    = document.getElementById('ska-clear-btn');
+  const analyze  = document.getElementById('ska-analyze-btn');
+  const status   = document.getElementById('ska-status');
+  const results  = document.getElementById('ska-results');
+  const hint     = document.getElementById('ska-preset-hint');
+  const compound = document.getElementById('ska-compound-visual');
+  const chips    = document.querySelectorAll('.ska-preset-chip');
+  if (!ta || !analyze) return;
+
+  const hideCompound = () => { if (compound) { compound.hidden = true; compound.innerHTML = ''; } };
+
+  const setStatus = (msg, cls) => {
+    status.textContent = msg || '';
+    status.className = 'ska-status' + (cls ? ' ska-status-' + cls : '');
+  };
+
+  fileIn?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      ta.value = reader.result;
+      setStatus(`Loaded ${f.name}`, 'ok');
+      hint.hidden = true;
+      hideCompound();
+      chips.forEach(c => c.classList.remove('active'));
+    };
+    reader.onerror = () => setStatus('Failed to read file', 'err');
+    reader.readAsText(f);
+  });
+
+  chips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      const preset = SKA_PRESETS.find(p => p.id === chip.dataset.preset);
+      if (!preset) return;
+      ta.value = JSON.stringify(preset.docs, null, 2);
+      chips.forEach(c => c.classList.toggle('active', c === chip));
+      hint.hidden = false;
+      hint.innerHTML = `
+        <div class="ska-preset-hint-head">${preset.headline}</div>
+        <div class="ska-preset-hint-meta">Optimal key: ${skaCompoundCode(preset.bestKey)} · Strategy: <strong>${preset.bestStrategy}</strong></div>
+        <div class="ska-preset-hint-body">${preset.why}</div>
+      `;
+      const compoundHTML = skaRenderCompoundVisual(preset);
+      if (compoundHTML) {
+        compound.innerHTML = compoundHTML;
+        compound.hidden = false;
+      } else {
+        hideCompound();
+      }
+      setStatus(`Loaded "${preset.label}" sample — click Analyze to see the recommendation.`, 'ok');
+    });
+  });
+
+  clear?.addEventListener('click', () => {
+    ta.value = '';
+    results.innerHTML = '';
+    hint.hidden = true;
+    hideCompound();
+    chips.forEach(c => c.classList.remove('active'));
+    setStatus('');
+  });
+
+  analyze.addEventListener('click', () => {
+    const raw = ta.value.trim();
+    if (!raw) { setStatus('Paste or upload a JSON document first.', 'err'); return; }
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (err) { setStatus('Invalid JSON: ' + err.message, 'err'); results.innerHTML = ''; return; }
+    const result = skaAnalyze(parsed);
+    if (result.error) { setStatus(result.error, 'err'); results.innerHTML = ''; return; }
+    setStatus(`Analyzed ${result.docs} document${result.docs === 1 ? '' : 's'} · ${result.candidates.length} field${result.candidates.length === 1 ? '' : 's'}.`, 'ok');
+    results.innerHTML = skaRenderResults(result);
+  });
 }
 
 // ===== QUERY EXECUTOR HELPERS =====
@@ -2292,6 +2808,9 @@ function initEventListeners() {
     updateHeaderStats();
     addLog('warn', 'All documents cleared.');
   });
+
+  // Bug Report
+  initBugReport();
 
   // Reset all
   document.getElementById('btn-reset-all').addEventListener('click', () => {
@@ -4645,6 +5164,61 @@ function initTooltip() {
   document.addEventListener('mouseover',  show);
   document.addEventListener('mousemove',  e => { if (tip.classList.contains('visible')) position(e); });
   document.addEventListener('mouseout',   hide);
+}
+
+function initBugReport() {
+  const RECIPIENTS = ['karthik.vangati@mongodb.com', 'sahib.chandnani@mongodb.com'];
+  const modal  = document.getElementById('bug-modal');
+  const openBtn = document.getElementById('btn-report-bug');
+  const closeBtn = document.getElementById('bug-modal-close');
+  const cancelBtn = document.getElementById('bug-cancel');
+  const form = document.getElementById('bug-form');
+  if (!modal || !openBtn || !form) return;
+
+  const open = () => {
+    modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('bug-first')?.focus(), 50);
+  };
+  const close = () => {
+    modal.style.display = 'none';
+    form.reset();
+  };
+
+  openBtn.addEventListener('click', open);
+  closeBtn?.addEventListener('click', close);
+  cancelBtn?.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && modal.style.display === 'flex') close();
+  });
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const first = document.getElementById('bug-first').value.trim();
+    const last  = document.getElementById('bug-last').value.trim();
+    const title = document.getElementById('bug-title').value.trim();
+    const email = document.getElementById('bug-email').value.trim();
+    const desc  = document.getElementById('bug-desc').value.trim();
+
+    const subject = `[Sharding Demo Bug] ${title}`;
+    const body =
+      `Name: ${first} ${last}\n` +
+      `Email: ${email}\n` +
+      `Title: ${title}\n\n` +
+      `Description:\n${desc}\n\n` +
+      `---\n` +
+      `Submitted from: ${location.href}\n` +
+      `User agent: ${navigator.userAgent}\n`;
+
+    const mailto = `mailto:${RECIPIENTS.join(',')}` +
+      `?subject=${encodeURIComponent(subject)}` +
+      `&body=${encodeURIComponent(body)}`;
+
+    window.location.href = mailto;
+    addLog('info', `Bug report drafted: <strong>${title.replace(/</g,'&lt;')}</strong>. Sent to your email client.`);
+    close();
+  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
