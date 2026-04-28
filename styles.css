@@ -3938,6 +3938,7 @@ input { font-family: inherit; font-size: inherit; }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 14px;
+  align-items: start;
 }
 
 .lim-card {
@@ -3956,7 +3957,28 @@ input { font-family: inherit; font-size: inherit; }
   gap: 12px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border-light);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.18s, padding-bottom 0.18s;
 }
+.lim-card-head:hover h5 { color: var(--mongo-green); }
+.lim-card-toggle {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform 0.2s ease, color 0.18s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.lim-card-head:hover .lim-card-toggle { color: var(--mongo-green); }
+.lim-card.collapsed .lim-card-toggle { transform: rotate(-90deg); }
+.lim-card.collapsed .lim-card-head {
+  padding-bottom: 0;
+  border-bottom-color: transparent;
+}
+.lim-card.collapsed .lim-list { display: none; }
+.lim-card { transition: gap 0.18s; }
+.lim-card.collapsed { gap: 0; }
 .lim-card-head h5 {
   font-size: 14px;
   font-weight: 700;
