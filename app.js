@@ -1324,11 +1324,11 @@ const SKA_PRESETS = [
   },
   {
     id: 'monotonic-trap',
-    label: 'Anti-pattern: monotonic id',
-    headline: 'Sequential order_id (hotspot demo)',
+    label: 'Avoid monotonic order_id → use customer_id',
+    headline: 'Orders with sequential order_id — recommended key is customer_id',
     bestKey: 'customer_id',
     bestStrategy: 'hashed',
-    why: 'A monotonically increasing <code>order_id</code> looks high-cardinality but routes every new write to the last chunk — the entire ingest hotspots one shard. <code>customer_id</code> has comparable cardinality without the monotonic write pattern.',
+    why: 'In this sample, <code>order_id</code> is the <strong>anti-pattern</strong>: it looks high-cardinality but is monotonically increasing, so every new write routes to the last chunk and hotspots one shard. The <strong>recommended</strong> shard key is <code>customer_id</code> — comparable cardinality, no monotonic write pattern, and orders for a given customer co-locate for targeted reads.',
     docs: [
       { order_id: 10001, customer_id: 'c_8421', amount: 42.00,  status: 'paid',    placed_at: '2026-04-23T09:00:00Z' },
       { order_id: 10002, customer_id: 'c_3092', amount: 180.50, status: 'paid',    placed_at: '2026-04-23T09:00:02Z' },
@@ -1338,6 +1338,24 @@ const SKA_PRESETS = [
       { order_id: 10006, customer_id: 'c_9930', amount: 220.00, status: 'paid',    placed_at: '2026-04-23T09:00:09Z' },
       { order_id: 10007, customer_id: 'c_2241', amount: 14.40,  status: 'paid',    placed_at: '2026-04-23T09:00:11Z' },
       { order_id: 10008, customer_id: 'c_4408', amount: 88.00,  status: 'cancelled', placed_at: '2026-04-23T09:00:13Z' }
+    ]
+  },
+  {
+    id: 'terrible-key',
+    label: 'Terrible: boolean is_active → use account_id',
+    headline: 'Boolean / low-cardinality shard key — only a handful of possible chunks',
+    bestKey: 'account_id',
+    bestStrategy: 'hashed',
+    why: 'In this sample, <code>is_active</code> is the <strong>worst-case</strong> shard key: a boolean has only <em>two</em> distinct values, so MongoDB can only ever create two chunks — the cluster cannot scale past two shards, and once enough rows share a value the chunk becomes an unsplittable <em>jumbo</em>. The same trap applies to low-cardinality enums like <code>plan</code> (3–4 values). The <strong>recommended</strong> key is <code>account_id</code>: high cardinality, even write distribution under hashed, and most queries already filter by account so reads stay targeted.',
+    docs: [
+      { account_id: 'acc_8421', is_active: true,  plan: 'pro',        last_login: '2026-04-23T10:00:00Z', region: 'us-east' },
+      { account_id: 'acc_3092', is_active: true,  plan: 'free',       last_login: '2026-04-23T10:01:12Z', region: 'us-west' },
+      { account_id: 'acc_7714', is_active: false, plan: 'pro',        last_login: '2026-04-22T18:44:01Z', region: 'eu-west' },
+      { account_id: 'acc_5520', is_active: true,  plan: 'enterprise', last_login: '2026-04-23T10:02:30Z', region: 'us-east' },
+      { account_id: 'acc_8421', is_active: true,  plan: 'pro',        last_login: '2026-04-23T10:03:01Z', region: 'us-east' },
+      { account_id: 'acc_9930', is_active: true,  plan: 'free',       last_login: '2026-04-23T10:03:45Z', region: 'ap-south' },
+      { account_id: 'acc_2241', is_active: true,  plan: 'pro',        last_login: '2026-04-23T10:04:10Z', region: 'us-east' },
+      { account_id: 'acc_4408', is_active: false, plan: 'free',       last_login: '2026-04-20T22:11:09Z', region: 'eu-west' }
     ]
   }
 ];
